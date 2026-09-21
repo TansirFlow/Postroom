@@ -3,6 +3,8 @@
 
 设计要点：
 - 一个任务 = 一条会话线程（task_messages），agent 与用户交替发言；
+- 任务归属于创建它的账号，控制台/Agent 侧一律按 ``user_id`` 过滤，
+  别人的任务 ID 一律当作「不存在」（不泄露存在性）；
 - 回复链接是 HMAC 签名令牌，用户点开即用，无需账号；
 - agent 可用长轮询（wait_seconds）等用户回复，避免高频空转。
 """
@@ -44,8 +46,9 @@ def _task_public(task: dict) -> dict:
     }
 
 
-def _load_task_or_404(task_id: str) -> dict:
-    task = storage.get_task(task_id)
+def _load_task_or_404(task_id: str, principal: Principal) -> dict:
+    """按当前账号取任务；别人的任务一律 404。"""
+    task = storage.get_task(task_id, user_id=principal.user_id, scoped=True)
     if not task:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -74,6 +77,7 @@ async def create_task(
         api_key_name=principal.name,
         meta=payload.meta,
         reply_expires_at=expires_at,
+        user_id=principal.user_id,
     )
     storage.add_task_message(
         task_id=task_id,
@@ -83,7 +87,13 @@ async def create_task(
         source="system",
     )
     task = storage.get_task(task_id) or {}
-    link = replylink.issue_for_task(task_id, version=task.get("token_version", 1), request=request, ttl_days=ttl)
+    link = replylink.issue_for_task(
+        task_id,
+        version=task.get("token_version", 1),
+        request=request,
+        ttl_days=ttl,
+        user_id=principal.user_id,
+    )
 
     return ok(
         request,
@@ -114,9 +124,11 @@ async def list_tasks(
     principal: Principal = Depends(current_principal),
 ):
     principal.require("tasks:read")
-    data = storage.list_tasks(page=page, page_size=page_size, status=status_filter, q=q)
+    data = storage.list_tasks(
+        page=page, page_size=page_size, status=status_filter, q=q, user_id=principal.user_id
+    )
     data["items"] = [_task_public(t) for t in data["items"]]
-    data["stats"] = storage.task_stats()
+    data["stats"] = storage.task_stats(user_id=principal.user_id)
     return ok(request, data)
 
 
@@ -129,12 +141,17 @@ async def get_task(
     principal: Principal = Depends(current_principal),
 ):
     principal.require("tasks:read")
-    task = _load_task_or_404(task_id)
+    task = _load_task_or_404(task_id, principal)
     messages = storage.list_task_messages(task_id, limit=limit)
     data = {"task": _task_public(task), "messages": messages}
     if include_link:
         data.update(
-            replylink.issue_for_task(task_id, version=task["token_version"], request=request)
+            replylink.issue_for_task(
+                task_id,
+                version=task["token_version"],
+                request=request,
+                user_id=principal.user_id,
+            )
         )
     return ok(request, data)
 
@@ -147,7 +164,7 @@ async def patch_task(
     principal: Principal = Depends(current_principal),
 ):
     principal.require("tasks:write")
-    _load_task_or_404(task_id)
+    _load_task_or_404(task_id, principal)
     updated = storage.update_task(
         task_id,
         title=payload.title,
@@ -155,7 +172,9 @@ async def patch_task(
         status=payload.status,
         meta=payload.meta,
     )
-    return ok(request, {"task": _task_public(_load_task_or_404(task_id)), "updated": updated})
+    return ok(
+        request, {"task": _task_public(_load_task_or_404(task_id, principal)), "updated": updated}
+    )
 
 
 @router.post("/{task_id}/close", summary="关闭任务（回复链接随之失效）")
@@ -163,12 +182,12 @@ async def close_task(
     task_id: str, request: Request, principal: Principal = Depends(current_principal)
 ):
     principal.require("tasks:write")
-    _load_task_or_404(task_id)
+    _load_task_or_404(task_id, principal)
     storage.update_task(task_id, status="closed")
     storage.add_task_message(
         task_id=task_id, role="system", content="任务已关闭", author="system", source="system"
     )
-    return ok(request, {"task": _task_public(_load_task_or_404(task_id))})
+    return ok(request, {"task": _task_public(_load_task_or_404(task_id, principal))})
 
 
 @router.post("/{task_id}/reopen", summary="重新打开任务")
@@ -176,9 +195,9 @@ async def reopen_task(
     task_id: str, request: Request, principal: Principal = Depends(current_principal)
 ):
     principal.require("tasks:write")
-    _load_task_or_404(task_id)
+    _load_task_or_404(task_id, principal)
     storage.update_task(task_id, status="open")
-    return ok(request, {"task": _task_public(_load_task_or_404(task_id))})
+    return ok(request, {"task": _task_public(_load_task_or_404(task_id, principal))})
 
 
 @router.post("/{task_id}/reply-link", summary="轮换回复链接（旧链接立即失效）")
@@ -186,9 +205,11 @@ async def rotate_link(
     task_id: str, request: Request, principal: Principal = Depends(current_principal)
 ):
     principal.require("tasks:write")
-    _load_task_or_404(task_id)
+    _load_task_or_404(task_id, principal)
     version = storage.rotate_reply_token(task_id)
-    link = replylink.issue_for_task(task_id, version=version or 1, request=request)
+    link = replylink.issue_for_task(
+        task_id, version=version or 1, request=request, user_id=principal.user_id
+    )
     return ok(
         request,
         {"task_id": task_id, "token_version": version, **link, "note": "此前发出的所有回复链接已失效"},
@@ -200,7 +221,7 @@ async def delete_task(
     task_id: str, request: Request, principal: Principal = Depends(current_principal)
 ):
     principal.require("tasks:write")
-    _load_task_or_404(task_id)
+    _load_task_or_404(task_id, principal)
     removed = storage.delete_task(task_id)
     return ok(
         request,
@@ -220,7 +241,7 @@ async def post_message(
     principal: Principal = Depends(current_principal),
 ):
     principal.require("tasks:write")
-    task = _load_task_or_404(task_id)
+    task = _load_task_or_404(task_id, principal)
 
     author = payload.author or task.get("agent_name") or principal.name
     message = storage.add_task_message(
@@ -230,11 +251,18 @@ async def post_message(
     result: dict = {"message": message}
     if payload.notify_email:
         # 把这条消息同时以邮件形式推给用户，并自动附带回复链接
+        smtp = mailer.smtp_for_user(principal.user_id)
         to_list = [str(a) for a in payload.notify_email]
-        link = replylink.issue_for_task(task_id, version=task["token_version"], request=request)
+        link = replylink.issue_for_task(
+            task_id,
+            version=task["token_version"],
+            request=request,
+            user_id=principal.user_id,
+        )
         from datetime import datetime
 
         expires = datetime.fromisoformat(link["reply_expires_at"])
+        subject = payload.notify_subject or f"[{task.get('title') or '任务'}] 有新消息"
         text_body, html_body = replylink.decorate(
             text=payload.content,
             html=None,
@@ -245,15 +273,17 @@ async def post_message(
         try:
             sent = mailer.send(
                 to=to_list,
-                subject=payload.notify_subject or f"[{task.get('title') or '任务'}] 有新消息",
+                subject=subject,
                 text=text_body,
                 html=html_body,
+                smtp=smtp,
             )
             storage.insert_mail_log(
+                user_id=principal.user_id,
                 api_key_name=principal.name,
-                sender=settings.from_email,
+                sender=smtp.from_addr,
                 to_addrs=to_list,
-                subject=payload.notify_subject or f"[{task.get('title') or '任务'}] 有新消息",
+                subject=subject,
                 status="sent",
                 message_id=sent.message_id,
                 latency_ms=sent.latency_ms,
@@ -265,6 +295,21 @@ async def post_message(
             )
             result["email"] = {"status": "sent", "to": to_list, "message_id": sent.message_id, **link}
         except mailer.MailError as exc:
+            storage.insert_mail_log(
+                user_id=principal.user_id,
+                api_key_name=principal.name,
+                sender=smtp.from_addr,
+                to_addrs=to_list,
+                subject=subject,
+                status="failed",
+                error=exc.message,
+                error_code=exc.code,
+                attempts=exc.attempts,
+                attachments=[],
+                body_preview=payload.content[: settings.body_preview_chars],
+                task_id=task_id,
+                reply_url=link["reply_url"],
+            )
             result["email"] = {"status": "failed", "to": to_list, "error": exc.to_dict()}
     return ok(request, result)
 
@@ -282,7 +327,7 @@ async def get_messages(
     principal: Principal = Depends(current_principal),
 ):
     principal.require("tasks:read")
-    task = _load_task_or_404(task_id)
+    task = _load_task_or_404(task_id, principal)
 
     deadline = time.monotonic() + wait_seconds
     messages = storage.list_task_messages(task_id, after_id=after_id, limit=limit, role=role)
@@ -305,6 +350,11 @@ async def get_messages(
     }
     if include_link and task["status"] == "open":
         data.update(
-            replylink.issue_for_task(task_id, version=task["token_version"], request=request)
+            replylink.issue_for_task(
+                task_id,
+                version=task["token_version"],
+                request=request,
+                user_id=principal.user_id,
+            )
         )
     return ok(request, data)

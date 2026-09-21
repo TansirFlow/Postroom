@@ -23,6 +23,13 @@ def _preview(text: str | None) -> str | None:
     return text[: settings.body_preview_chars]
 
 
+def _test_recipients(user_id: str | None) -> list[str]:
+    """测试收件人：用户自己配的优先，否则用服务器的全局列表。"""
+    raw = (storage.get_user_settings(user_id) or {}).get("test_recipients") or ""
+    items = [o.strip() for o in raw.split(",") if o.strip()]
+    return items or settings.test_recipient_list
+
+
 @router.post("/send", summary="发送邮件（agent 主入口）")
 async def send_mail(
     payload: SendMailRequest,
@@ -31,9 +38,14 @@ async def send_mail(
 ):
     principal.require("mail:send")
 
+    # 该用户自己的 SMTP（未配置则回落服务器全局）
+    smtp = mailer.smtp_for_user(principal.user_id)
+
     # ---- 幂等：同一 idempotency_key 直接返回上次结果 ----
     if payload.idempotency_key:
-        existed = storage.find_mail_log_by_idempotency(payload.idempotency_key)
+        existed = storage.find_mail_log_by_idempotency(
+            payload.idempotency_key, user_id=principal.user_id
+        )
         if existed:
             return ok(
                 request,
@@ -99,7 +111,7 @@ async def send_mail(
     task: dict | None = None
     reply_url: str | None = None
     if payload.task_id:
-        task = storage.get_task(payload.task_id)
+        task = storage.get_task(payload.task_id, user_id=principal.user_id, scoped=True)
         if not task:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -114,7 +126,10 @@ async def send_mail(
     thread_content = text_body or html_body or ""
     if task and payload.attach_reply_link:
         link = replylink.issue_for_task(
-            task["id"], version=task["token_version"], request=request
+            task["id"],
+            version=task["token_version"],
+            request=request,
+            user_id=principal.user_id,
         )
         reply_url = link["reply_url"]
         text_body, html_body = replylink.decorate(
@@ -138,10 +153,11 @@ async def send_mail(
 
     def log(status_: str, **extra):
         return storage.insert_mail_log(
+            user_id=principal.user_id,
             request_id=request_id,
             client_ip=client_ip,
             api_key_name=principal.name,
-            sender=settings.from_email,
+            sender=smtp.from_addr,
             to_addrs=to_list,
             cc_addrs=cc_list,
             bcc_addrs=bcc_list,
@@ -166,6 +182,7 @@ async def send_mail(
             html=html_body,
             reply_to=str(payload.reply_to) if payload.reply_to else None,
             attachments=payload.attachments,
+            smtp=smtp,
         )
     except mailer.MailError as exc:
         log_id = log(
@@ -245,14 +262,16 @@ async def list_logs(
     principal.require("mail:read")
     return ok(
         request,
-        storage.list_mail_logs(page=page, page_size=page_size, status=status_filter, q=q),
+        storage.list_mail_logs(
+            page=page, page_size=page_size, status=status_filter, q=q, user_id=principal.user_id
+        ),
     )
 
 
 @router.get("/logs/{log_id}", summary="查询单封邮件详情")
 async def get_log(log_id: str, request: Request, principal: Principal = Depends(current_principal)):
     principal.require("mail:read")
-    record = storage.get_mail_log(log_id)
+    record = storage.get_mail_log(log_id, user_id=principal.user_id)
     if not record:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -264,7 +283,7 @@ async def get_log(log_id: str, request: Request, principal: Principal = Depends(
 @router.get("/stats", summary="发信统计")
 async def stats(request: Request, principal: Principal = Depends(current_principal)):
     principal.require("mail:read")
-    data = storage.mail_stats()
+    data = storage.mail_stats(user_id=principal.user_id)
     data["rate_limit"] = ratelimit.snapshot(principal.name)
     return ok(request, data)
 
@@ -278,10 +297,10 @@ async def list_templates(request: Request, principal: Principal = Depends(curren
 @router.post("/verify-connection", summary="测试 SMTP 连通性与登录")
 async def verify_connection(request: Request, principal: Principal = Depends(current_principal)):
     principal.require("mail:send")
-    return ok(request, mailer.check_connection())
+    return ok(request, mailer.check_connection(mailer.smtp_for_user(principal.user_id)))
 
 
 @router.get("/test-recipients", summary="测试收件人列表")
 async def test_recipients(request: Request, principal: Principal = Depends(current_principal)):
     principal.require("mail:send")
-    return ok(request, {"recipients": settings.test_recipient_list})
+    return ok(request, {"recipients": _test_recipients(principal.user_id)})

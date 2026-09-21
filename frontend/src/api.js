@@ -1,23 +1,52 @@
 /**
- * API 客户端：统一处理 {ok, data, error, request_id} 包裹、API Key 注入、错误抛出。
+ * API 客户端：统一处理 {ok, data, error, request_id} 包裹、会话令牌注入、错误抛出。
+ *
+ * 鉴权模型（多用户）：
+ * - 人在网页 → 账号密码登录拿到会话令牌，存 localStorage，随请求以
+ *   `Authorization: Bearer <token>` 发送；
+ * - Agent/脚本 → 用 API Key（`X-API-Key`），不走这里。
+ * 令牌失效（401）时自动清空本地状态并跳回登录页。
  */
 import { reactive } from 'vue'
 
-const KEY_STORAGE = 'agent_api_key'
+const TOKEN_STORAGE = 'postroom_token'
+const USER_STORAGE = 'postroom_user'
+
+function readUser() {
+  try {
+    return JSON.parse(localStorage.getItem(USER_STORAGE) || 'null')
+  } catch (e) {
+    return null
+  }
+}
 
 export const state = reactive({
-  apiKey: localStorage.getItem(KEY_STORAGE) || '',
+  token: localStorage.getItem(TOKEN_STORAGE) || '',
+  user: readUser(),
   toasts: [],
   health: { ok: null, latency: null, checkedAt: null },
   // 站点展示信息（应用名 / 备案号），由 /api/v1/site 填充
   site: { app: '', version: '', icp: '', icpUrl: '' },
 })
 
-export function setApiKey(key) {
-  state.apiKey = key.trim()
-  if (state.apiKey) localStorage.setItem(KEY_STORAGE, state.apiKey)
-  else localStorage.removeItem(KEY_STORAGE)
+/** 401 时的回调，由 router 注册（避免循环依赖） */
+export const authEvents = { onUnauthorized: null }
+
+export function setSession(token, user) {
+  state.token = (token || '').trim()
+  state.user = user || null
+  if (state.token) localStorage.setItem(TOKEN_STORAGE, state.token)
+  else localStorage.removeItem(TOKEN_STORAGE)
+  if (state.user) localStorage.setItem(USER_STORAGE, JSON.stringify(state.user))
+  else localStorage.removeItem(USER_STORAGE)
 }
+
+export function clearSession() {
+  setSession('', null)
+}
+
+export const isLoggedIn = () => Boolean(state.token)
+export const isAdmin = () => Boolean(state.user && state.user.is_admin)
 
 export function toast(message, type = 'success', timeout = 4200) {
   const id = Math.random().toString(36).slice(2)
@@ -40,7 +69,7 @@ export class ApiError extends Error {
 async function request(path, { method = 'GET', body, raw = false, auth = true } = {}) {
   const headers = {}
   if (body !== undefined) headers['Content-Type'] = 'application/json'
-  if (auth && state.apiKey) headers['X-API-Key'] = state.apiKey
+  if (auth && state.token) headers['Authorization'] = `Bearer ${state.token}`
 
   const started = performance.now()
   let res
@@ -62,6 +91,12 @@ async function request(path, { method = 'GET', body, raw = false, auth = true } 
     json = null
   }
 
+  if (res.status === 401 && auth && state.token) {
+    // 令牌过期 / 被吊销 / 账号被停用 → 清掉本地登录态并回登录页
+    clearSession()
+    if (authEvents.onUnauthorized) authEvents.onUnauthorized()
+  }
+
   if (json && json.ok === false) {
     const err = json.error || {}
     throw new ApiError(err.message || `请求失败 (${res.status})`, err.code || 'error', res.status, err)
@@ -76,13 +111,44 @@ async function request(path, { method = 'GET', body, raw = false, auth = true } 
 export const api = {
   get: (p) => request(p),
   post: (p, body) => request(p, { method: 'POST', body }),
+  put: (p, body) => request(p, { method: 'PUT', body }),
   patch: (p, body) => request(p, { method: 'PATCH', body }),
   del: (p) => request(p, { method: 'DELETE' }),
   raw: (p, opts) => request(p, opts),
 
+  /** 账号密码登录；成功后写入本地会话 */
+  async login(username, password) {
+    const data = await request('/api/v1/auth/login', {
+      method: 'POST',
+      auth: false,
+      body: { username, password },
+    })
+    setSession(data?.token, data?.user)
+    return data
+  },
+
+  /** 校验当前会话是否仍有效，并刷新用户信息 */
+  async me() {
+    const data = await request('/api/v1/auth/me')
+    if (data?.user) {
+      state.user = data.user
+      localStorage.setItem(USER_STORAGE, JSON.stringify(data.user))
+    }
+    return data
+  },
+
+  async logout() {
+    try {
+      await request('/api/v1/auth/logout', { method: 'POST', auth: false })
+    } catch (e) {
+      /* 令牌无状态，登出失败也不影响本地清理 */
+    }
+    clearSession()
+  },
+
   /** 健康检查，供顶栏状态灯使用 */
   async ping() {
-    const { data, latency } = await request('/api/v1/health', { raw: true })
+    const { data, latency } = await request('/api/v1/health', { raw: true, auth: false })
     state.health = {
       ok: data?.status === 'ok',
       latency,
@@ -94,7 +160,7 @@ export const api = {
   },
 }
 
-/** 站点信息（应用名 / ICP 备案号）。公开接口，无 Key 也能拿到。 */
+/** 站点信息（应用名 / ICP 备案号）。公开接口，未登录也能拿到。 */
 export async function loadSiteInfo() {
   try {
     const data = await request('/api/v1/site', { auth: false })
@@ -124,7 +190,7 @@ export function fmtBytes(n) {
   return `${(n / 1024 / 1024).toFixed(2)} MB`
 }
 
-/** 免登录回复页专用：链接本身即凭证，不携带 API Key。 */
+/** 免登录回复页专用：链接本身即凭证，不携带任何登录态。 */
 export const replyApi = {
   open: (token) => request(`/api/v1/reply/${encodeURIComponent(token)}`, { auth: false }),
   poll: (token, afterId, waitSeconds = 25) => {

@@ -3,7 +3,12 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+# 运行期数据（账号口令哈希、API 密钥、令牌签名私钥、SQLite 库）与本地备份
 backend/data/
+backend/data.bak*/
+backend/*.db
+backend/*.db-wal
+backend/*.db-shm
 backend/.env
 
 # ---- Node ----

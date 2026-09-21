@@ -5,12 +5,24 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from .. import tokens
+from .. import storage, tokens
 from ..config import settings
 
 
-def resolve_base_url(request=None) -> str:
-    """确定对外可访问的根地址：优先配置项，其次取当前请求的 host。"""
+def user_base_url(user_id: str | None) -> str:
+    """用户级「对外根地址」：用户在设置页填了自己的域名就用它。"""
+    if user_id:
+        saved = (storage.get_user_settings(user_id) or {}).get("public_base_url")
+        if saved and str(saved).strip():
+            return str(saved).strip().rstrip("/")
+    return ""
+
+
+def resolve_base_url(request=None, user_id: str | None = None) -> str:
+    """确定对外可访问的根地址：用户配置 > 全局配置 > 当前请求 host。"""
+    custom = user_base_url(user_id)
+    if custom:
+        return custom
     if settings.public_base_url:
         return settings.public_base_url.rstrip("/")
     if request is not None:
@@ -19,11 +31,15 @@ def resolve_base_url(request=None) -> str:
 
 
 def issue_for_task(
-    task_id: str, version: int = 1, request=None, ttl_days: int | None = None
+    task_id: str,
+    version: int = 1,
+    request=None,
+    ttl_days: int | None = None,
+    user_id: str | None = None,
 ) -> dict:
     """为任务签发一个新的回复链接（同一任务可签发多个，互不影响）。"""
     token, expires_at = tokens.issue_token(task_id, version=version, ttl_days=ttl_days)
-    url = tokens.build_reply_url(resolve_base_url(request), token)
+    url = tokens.build_reply_url(resolve_base_url(request, user_id), token)
     return {
         "reply_url": url,
         "reply_token": token,

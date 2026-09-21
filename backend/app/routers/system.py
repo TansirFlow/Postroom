@@ -17,10 +17,6 @@ router = APIRouter(prefix="/api/v1", tags=["系统 System"])
 _STARTED_AT = time.time()
 
 
-def _smtp_ready() -> bool:
-    return bool(settings.smtp_host and settings.smtp_user and settings.smtp_password)
-
-
 @router.get("/health", summary="健康检查（无需鉴权）")
 async def health(request: Request):
     return ok(
@@ -31,7 +27,7 @@ async def health(request: Request):
             "version": settings.app_version,
             "env": settings.env,
             "uptime_seconds": int(time.time() - _STARTED_AT),
-            "smtp_configured": _smtp_ready(),
+            "smtp_configured": mailer.default_smtp().configured,
             "python": platform.python_version(),
         },
     )
@@ -39,7 +35,7 @@ async def health(request: Request):
 
 @router.get("/site", summary="公开站点信息（无需鉴权）")
 async def site(request: Request):
-    """前端页脚 / 品牌信息。只暴露与站点展示相关、可公开的字段。"""
+    """前端页脚 / 品牌 / 登录页信息。只暴露与站点展示相关、可公开的字段。"""
     return ok(
         request,
         {
@@ -47,6 +43,8 @@ async def site(request: Request):
             "version": settings.app_version,
             "icp_license": settings.icp_license,
             "icp_license_url": settings.icp_license_url,
+            "multi_user": True,
+            "login_required": True,
         },
     )
 
@@ -54,7 +52,8 @@ async def site(request: Request):
 @router.get("/overview", summary="控制台概览数据")
 async def overview(request: Request, principal: Principal = Depends(current_principal)):
     principal.require("mail:read")
-    stats = storage.mail_stats()
+    smtp = mailer.smtp_for_user(principal.user_id)
+    stats = storage.mail_stats(user_id=principal.user_id)
     return ok(
         request,
         {
@@ -65,20 +64,37 @@ async def overview(request: Request, principal: Principal = Depends(current_prin
                 "uptime_seconds": int(time.time() - _STARTED_AT),
             },
             "smtp": {
-                "host": settings.smtp_host,
-                "port": settings.smtp_port,
-                "ssl": settings.smtp_use_ssl,
-                "user": settings.smtp_user,
-                "from_email": settings.from_email,
-                "from_name": settings.smtp_from_name,
-                "configured": _smtp_ready(),
-                "password_set": bool(settings.smtp_password),
+                "host": smtp.host,
+                "port": smtp.port,
+                "ssl": smtp.use_ssl,
+                "starttls": smtp.starttls,
+                "user": smtp.user,
+                "from_email": smtp.from_addr,
+                "from_name": smtp.from_name,
+                "configured": smtp.configured,
+                "password_set": bool(smtp.password),
+                # 用服务器全局配置，还是用户自己的
+                "source": smtp.source,
+                "own_config": bool((storage.get_user_settings(principal.user_id) or {}).get("smtp")),
             },
+            "public_base_url": mailer.base_url_for_user(principal.user_id, request),
             "mail_stats": stats,
-            "task_stats": storage.task_stats(),
-            "keys": {"count": storage.count_api_keys(), "rate_limit_per_hour": settings.rate_limit_per_hour},
-            "test_recipients": settings.test_recipient_list,
-            "principal": {"name": principal.name, "scopes": principal.scopes, "is_admin": principal.is_admin},
+            "task_stats": storage.task_stats(user_id=principal.user_id),
+            "keys": {
+                "count": storage.count_api_keys(user_id=principal.user_id),
+                "rate_limit_per_hour": settings.rate_limit_per_hour,
+            },
+            "test_recipients": (
+                [
+                    o.strip()
+                    for o in str(
+                        (storage.get_user_settings(principal.user_id) or {}).get("test_recipients") or ""
+                    ).split(",")
+                    if o.strip()
+                ]
+                or settings.test_recipient_list
+            ),
+            "principal": principal.to_dict(),
             "capabilities": [
                 "mail.send",
                 "mail.logs",
@@ -87,25 +103,19 @@ async def overview(request: Request, principal: Principal = Depends(current_prin
                 "tasks.thread",
                 "tasks.reply_link",
                 "keys.manage",
+                "settings.manage",
+                "users.manage" if principal.is_admin else None,
             ],
         },
     )
 
 
-@router.get("/whoami", summary="校验当前 API Key 与权限")
+@router.get("/whoami", summary="校验当前凭证与权限")
 async def whoami(request: Request, principal: Principal = Depends(current_principal)):
-    return ok(
-        request,
-        {
-            "name": principal.name,
-            "key_id": principal.key_id,
-            "scopes": principal.scopes,
-            "is_admin": principal.is_admin,
-        },
-    )
+    return ok(request, principal.to_dict())
 
 
-@router.get("/smtp-check", summary="SMTP 连通性检查")
+@router.get("/smtp-check", summary="SMTP 连通性检查（用当前账号生效的配置）")
 async def smtp_check(request: Request, principal: Principal = Depends(current_principal)):
     principal.require("mail:send")
-    return ok(request, mailer.check_connection())
+    return ok(request, mailer.check_connection(mailer.smtp_for_user(principal.user_id)))

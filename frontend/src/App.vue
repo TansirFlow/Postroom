@@ -1,40 +1,52 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
-import { api, setApiKey, state, toast } from './api'
+import { useRoute, useRouter } from 'vue-router'
+import { api, state, toast } from './api'
 import SiteFooter from './components/SiteFooter.vue'
 
 const route = useRoute()
-const keyInput = ref(state.apiKey)
-const showKeyModal = ref(false)
+const router = useRouter()
 const pinging = ref(false)
 const taskStats = ref({ waiting_reply_tasks: 0, open: 0 })
+const menuOpen = ref(false)
 
 const isBare = computed(() => Boolean(route.meta.bare))
+const isAdmin = computed(() => Boolean(state.user && state.user.is_admin))
 
-const navGroups = [
-  {
-    label: '能力模块',
-    items: [
-      { path: '/', icon: '◈', text: '概览' },
-      { path: '/compose', icon: '✉', text: '发信工作台' },
-      { path: '/tasks', icon: '💬', text: '任务会话', badge: () => taskStats.value.waiting_reply_tasks },
-      { path: '/logs', icon: '☰', text: '发送记录' },
-    ],
-  },
-  {
-    label: '开发者',
-    items: [
-      { path: '/docs', icon: '{ }', text: '接口文档 / Agent 工具' },
-      { path: '/keys', icon: '🔑', text: 'API 密钥' },
-    ],
-  },
-]
+const navGroups = computed(() => {
+  const groups = [
+    {
+      label: '能力模块',
+      items: [
+        { path: '/', icon: '◈', text: '概览' },
+        { path: '/compose', icon: '✉', text: '发信工作台' },
+        { path: '/tasks', icon: '💬', text: '任务会话', badge: () => taskStats.value.waiting_reply_tasks },
+        { path: '/logs', icon: '☰', text: '发送记录' },
+      ],
+    },
+    {
+      label: '开发者',
+      items: [
+        { path: '/docs', icon: '{ }', text: '接口文档 / Agent 工具' },
+        { path: '/keys', icon: '🔑', text: 'API 密钥' },
+      ],
+    },
+    {
+      label: '账号',
+      items: [
+        { path: '/settings', icon: '⚙', text: '系统设置' },
+        ...(isAdmin.value ? [{ path: '/users', icon: '👥', text: '用户管理' }] : []),
+      ],
+    },
+  ]
+  return groups
+})
 
 const pageTitle = computed(() => route.meta.title || '控制台')
-const keyMasked = computed(() =>
-  state.apiKey ? `${state.apiKey.slice(0, 10)}…${state.apiKey.slice(-4)}` : '未配置',
+const displayName = computed(
+  () => (state.user && (state.user.display_name || state.user.username)) || '未登录',
 )
+const roleLabel = computed(() => (isAdmin.value ? '管理员' : '普通用户'))
 const healthText = computed(() => {
   if (state.health.ok === null) return '检测中…'
   return state.health.ok ? `在线 · ${state.health.latency}ms` : '离线'
@@ -57,44 +69,59 @@ async function ping() {
 }
 
 async function loadTaskStats() {
-  if (!state.apiKey) return
+  if (!state.token) return
   try {
     const data = await api.get('/api/v1/tasks?page=1&page_size=1')
     taskStats.value = data.stats || {}
   } catch (e) {
-    /* 忽略：未配置 key 或无权限 */
+    /* 忽略：无权限或接口不可用 */
   }
 }
 
-function saveKey() {
-  setApiKey(keyInput.value)
-  showKeyModal.value = false
-  toast(state.apiKey ? 'API Key 已保存' : '已清除 API Key')
-  ping()
-  loadTaskStats()
+async function refreshMe() {
+  if (!state.token) return
+  try {
+    await api.me()
+  } catch (e) {
+    /* 401 已由 api.js 统一处理 */
+  }
 }
 
-function openKeyModal() {
-  keyInput.value = state.apiKey
-  showKeyModal.value = true
+async function logout() {
+  menuOpen.value = false
+  await api.logout()
+  toast('已退出登录')
+  router.replace('/login')
+}
+
+function toggleMenu() {
+  menuOpen.value = !menuOpen.value
+}
+
+function closeMenu() {
+  menuOpen.value = false
 }
 
 let timer
-onMounted(() => {
-  ping()
-  loadTaskStats()
+onMounted(async () => {
+  await Promise.all([ping(), loadTaskStats(), refreshMe()])
+  if (route.query.denied === 'admin') toast('该页面仅管理员可访问', 'warn')
   timer = setInterval(() => {
     ping()
     loadTaskStats()
   }, 45000)
+  document.addEventListener('click', closeMenu)
 })
-onUnmounted(() => clearInterval(timer))
+onUnmounted(() => {
+  clearInterval(timer)
+  document.removeEventListener('click', closeMenu)
+})
 
 watch(() => route.path, loadTaskStats)
 </script>
 
 <template>
-  <!-- 免登录回复页：整页独立布局 -->
+  <!-- 登录页 / 免登录回复页：整页独立布局 -->
   <router-view v-if="isBare" />
 
   <div v-else class="layout">
@@ -136,18 +163,25 @@ watch(() => route.path, loadTaskStats)
         <button class="btn btn-sm" :disabled="pinging" :title="state.health.checkedAt || ''" @click="ping">
           {{ pinging ? '检测中…' : '刷新状态' }}
         </button>
-        <button class="btn btn-sm" @click="openKeyModal">
-          <span class="dot" :class="state.apiKey ? '' : 'off'" />
-          <span class="mono">{{ keyMasked }}</span>
-        </button>
+        <div class="user-menu">
+          <button class="btn btn-sm user-btn" @click.stop="toggleMenu">
+            <span class="avatar">{{ displayName.slice(0, 1).toUpperCase() }}</span>
+            <span class="user-name">{{ displayName }}</span>
+            <span class="chip chip-role">{{ roleLabel }}</span>
+          </button>
+          <div v-if="menuOpen" class="dropdown" @click.stop>
+            <div class="dropdown-head">
+              <div class="user-name">{{ displayName }}</div>
+              <div class="small muted mono">{{ state.user?.username }}</div>
+            </div>
+            <router-link class="dropdown-item" to="/settings" @click="closeMenu">⚙ 系统设置</router-link>
+            <router-link v-if="isAdmin" class="dropdown-item" to="/users" @click="closeMenu">👥 用户管理</router-link>
+            <button class="dropdown-item danger" @click="logout">↪ 退出登录</button>
+          </div>
+        </div>
       </header>
 
       <main class="content">
-        <div v-if="!state.apiKey" class="banner banner-warn">
-          <span>尚未配置 API Key，页面数据无法加载。</span>
-          <button class="btn btn-sm" @click="openKeyModal">立即配置</button>
-          <span class="small">首次启动的密钥会打印在后端控制台，并保存在 backend/data/keys.txt</span>
-        </div>
         <router-view />
         <SiteFooter />
       </main>
@@ -155,25 +189,6 @@ watch(() => route.path, loadTaskStats)
 
     <div class="toasts">
       <div v-for="t in state.toasts" :key="t.id" class="toast" :class="t.type">{{ t.message }}</div>
-    </div>
-
-    <div v-if="showKeyModal" class="modal-mask" @click.self="showKeyModal = false">
-      <div class="modal">
-        <div class="modal-head">API Key 配置</div>
-        <div class="modal-body">
-          <div class="field">
-            <label class="field-label">API Key</label>
-            <input v-model="keyInput" type="password" placeholder="sk-agent-xxxxxxxx" @keyup.enter="saveKey" />
-            <div class="field-hint">
-              仅保存在浏览器 localStorage，随每个请求以 <code>X-API-Key</code> 头发送。可在「API 密钥」页新建或吊销。
-            </div>
-          </div>
-        </div>
-        <div class="modal-foot">
-          <button class="btn" @click="showKeyModal = false">取消</button>
-          <button class="btn btn-primary" @click="saveKey">保存</button>
-        </div>
-      </div>
     </div>
   </div>
 </template>

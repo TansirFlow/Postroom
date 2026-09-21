@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
-import { api, state, toast } from '../api'
+import { api, toast } from '../api'
 
 const toolsData = ref(null)
 const loadError = ref('')
@@ -36,11 +36,20 @@ const endpoints = [
   { method: 'POST', path: '/api/v1/keys', scope: 'keys:manage', desc: '创建密钥（明文仅返回一次）' },
   { method: 'PATCH', path: '/api/v1/keys/{id}', scope: 'keys:manage', desc: '启用 / 停用密钥' },
   { method: 'DELETE', path: '/api/v1/keys/{id}', scope: 'keys:manage', desc: '删除密钥' },
+  { method: 'POST', path: '/api/v1/auth/login', scope: '—（公开）', desc: '账号密码登录，换会话令牌' },
+  { method: 'GET', path: '/api/v1/auth/me', scope: '任意凭证', desc: '当前登录身份与权限' },
+  { method: 'POST', path: '/api/v1/auth/password', scope: '登录会话', desc: '修改自己的密码' },
+  { method: 'GET', path: '/api/v1/settings', scope: 'mail:read', desc: '读取本账号设置（SMTP 等）' },
+  { method: 'PUT', path: '/api/v1/settings', scope: '登录会话', desc: '保存本账号设置' },
+  { method: 'GET', path: '/api/v1/users', scope: 'users:manage', desc: '用户列表（仅管理员）' },
+  { method: 'POST', path: '/api/v1/users', scope: 'users:manage', desc: '新建账号（仅管理员）' },
 ]
 
 const base = computed(() => window.location.origin)
-const keyPlaceholder = computed(() => (state.apiKey ? state.apiKey.slice(0, 10) + '…' : 'sk-agent-xxxxxxxx'))
-const keyReal = computed(() => state.apiKey || 'sk-agent-xxxxxxxx')
+// 控制台用会话令牌登录；调用下面这些接口的是 Agent，用的是在「API 密钥」页创建的密钥
+const PLACEHOLDER_KEY = 'sk-agent-xxxxxxxx'
+const keyPlaceholder = computed(() => PLACEHOLDER_KEY)
+const keyReal = computed(() => PLACEHOLDER_KEY)
 
 // 页面展示用掩码密钥（便于截图分享），点「复制」时替换为真实密钥
 function buildSnippets(key) {

@@ -51,6 +51,17 @@ class Settings(BaseSettings):
     rate_limit_per_hour: int = 120
     max_attachment_bytes: int = 10 * 1024 * 1024
 
+    # ---------- 多用户 / 登录会话 ----------
+    # 首个管理员账号的用户名；密码留空则首次启动随机生成并写入 data/keys.txt
+    bootstrap_admin_username: str = "admin"
+    bootstrap_admin_password: str = ""
+    # 登录会话有效期（小时）
+    session_ttl_hours: int = 72
+    # 登录失败限流：同一用户名 + IP 每小时最多尝试次数
+    login_rate_limit_per_hour: int = 20
+    # 会话令牌同时写入 HttpOnly Cookie（便于同源前端，可关）
+    session_cookie_name: str = "postroom_session"
+
     # ---------- 测试收件人（部署后由管理员在 .env 里填写，仓库不含真实值） ----------
     test_recipients: str = ""
 

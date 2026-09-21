@@ -266,6 +266,7 @@ async def tools(request: Request):
                 "type": "api_key",
                 "header": "X-API-Key",
                 "alternative": "Authorization: Bearer <key>",
+                "note": "每个密钥归属于一个控制台账号，其邮件记录 / 任务 / SMTP 配置按账号隔离",
             },
             "response_format": {
                 "success": {"ok": True, "data": {}, "error": None, "request_id": "req_xxx"},
@@ -286,7 +287,17 @@ async def manifest(request: Request):
         {
             "service": settings.app_name,
             "version": settings.app_version,
-            "summary": "面向 AI Agent 的工具型 API 服务器：邮件发送 + 任务会话（邮件内嵌免登录回复链接，用户可在网页里直接与 Agent 对话）。",
+            "summary": (
+                "面向 AI Agent 的工具型 API 服务器（多用户）：邮件发送 + 任务会话"
+                "（邮件内嵌免登录回复链接，用户可在网页里直接与 Agent 对话）。"
+                "每个 API 密钥归属于一个控制台账号，邮件记录、任务与 SMTP 配置互相隔离。"
+            ),
+            "multi_user": {
+                "login": "POST /api/v1/auth/login（账号密码，返回会话令牌）",
+                "isolation": "密钥 / 发信记录 / 任务 / 设置均按账号（user_id）隔离",
+                "settings": "GET|PUT /api/v1/settings（每个账号可以配置自己的 SMTP 与回复链接域名）",
+                "account_creation": "仅管理员可在 POST /api/v1/users 创建账号；登录页无自助注册",
+            },
             "task_flow": [
                 "1. 任务启动：POST /api/v1/tasks → 拿到 task_id 与 reply_url",
                 "2. 汇报进展：POST /api/v1/mail/send（带 task_id）→ 邮件正文自动附带回复链接",

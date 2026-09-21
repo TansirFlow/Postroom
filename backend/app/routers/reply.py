@@ -172,5 +172,13 @@ async def refresh_link(token: str, request: Request):
         )
     return ok(
         request,
-        {"task_id": task["id"], **replylink.issue_for_task(task["id"], version=task["token_version"], request=request)},
+        {
+            "task_id": task["id"],
+            **replylink.issue_for_task(
+                task["id"],
+                version=task["token_version"],
+                request=request,
+                user_id=task.get("user_id"),
+            ),
+        },
     )

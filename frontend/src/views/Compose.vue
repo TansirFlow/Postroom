@@ -19,6 +19,8 @@ const form = reactive({
 
 const tasks = ref([])
 const templates = ref([])
+// 当前部署地址（多用户/多域名场景下不要写死端口）
+const apiOrigin = window.location.origin
 const templateVars = ref({})
 const attachments = ref([])
 const testRecipients = ref([])
@@ -396,12 +398,13 @@ onMounted(loadMeta)
       <div class="card">
         <div class="card-head"><div class="card-title">cURL 复现</div></div>
         <div class="card-body">
-          <pre class="code">curl -X POST http://127.0.0.1:8077/api/v1/mail/send \
+          <pre class="code">curl -X POST {{ apiOrigin }}/api/v1/mail/send \
   -H "Content-Type: application/json" \
   -H "X-API-Key: $AGENT_API_KEY" \
   -d '{{ payloadPreview.replace(/\s+/g, ' ').slice(0, 220) }}'</pre>
           <div class="field-hint" style="margin-top: 8px">
-            提示：地址栏的 <code>127.0.0.1:8077</code> 换成你的部署地址即可给 Agent 使用。
+            提示：把 <code>{{ apiOrigin }}</code> 换成你的部署地址即可给 Agent 使用；
+            <code>$AGENT_API_KEY</code> 取自「API 密钥」页。
           </div>
         </div>
       </div>
