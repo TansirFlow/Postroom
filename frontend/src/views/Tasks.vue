@@ -295,9 +295,13 @@ onMounted(loadList)
 
       <div class="card-body" style="border-top: 1px solid var(--border)">
         <div class="field-label">以 Agent 身份发言（需要 {{ scopesHint }} 权限）</div>
+        <div class="field-hint">
+          留空会沿用该任务之前的通知邮箱；如果还没有，则使用「系统设置」里的默认通知邮箱。
+          <span v-if="detail.notification_emails?.length">当前任务：{{ detail.notification_emails.join(', ') }}</span>
+        </div>
         <textarea v-model="draft" rows="3" placeholder="追加一条 Agent 消息…" />
         <div class="row" style="margin-top: 10px">
-          <input v-model="notifyEmail" type="text" placeholder="同时邮件通知（可选，多个用逗号分隔）" />
+          <input v-model="notifyEmail" type="text" placeholder="覆盖通知邮箱（可选，多个用逗号分隔）" />
           <button class="btn btn-primary" :disabled="busy || !draft.trim()" @click="sendAsAgent">发送</button>
         </div>
       </div>

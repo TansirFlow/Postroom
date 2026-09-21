@@ -498,12 +498,14 @@ else:
     check("全局配置视图不含明文密码", "password" not in ((d.get("global_smtp") or {})))
 
     own_host = f"smtp.{uniq}.example.com"
+    notify_email = f"notify-{uniq}@example.com"
     st, r = call("PUT", "/api/v1/settings", {
         "smtp": {"host": own_host, "port": 587, "use_ssl": False, "starttls": True,
                  "user": f"{uniq}@example.com", "password": "Pw-" + rand(8),
                  "from_email": f"{uniq}@example.com", "from_name": "回归用户"},
         "public_base_url": f"https://{uniq}.example.com",
         "test_recipients": f"{uniq}@example.com",
+        "notification_email": notify_email,
     }, token=user_token)
     eff = (r.get("data") or {}).get("effective_smtp") or {}
     check("PUT /settings 保存成功", st == 200 and (r.get("data") or {}).get("saved") is True, f"status={st}")
@@ -511,6 +513,7 @@ else:
     check("生效 SMTP source=user", eff.get("source") == "user", str(eff.get("source")))
     check("接口不回传明文密码", "password" not in eff and eff.get("password_set") is True)
     check("回复链接域名生效", (r.get("data") or {}).get("effective_public_base_url") == f"https://{uniq}.example.com")
+    check("默认通知邮箱保存成功", (r.get("data") or {}).get("notification_email") == notify_email)
 
     st, r = call("GET", "/api/v1/settings", token=admin_token)
     check("管理员设置未被影响（仍是全局）", (r.get("data") or {}).get("smtp_configured") is False, str((r.get('data') or {}).get('smtp_configured')))

@@ -25,6 +25,18 @@ from ..services import mailer, replylink
 router = APIRouter(prefix="/api/v1/tasks", tags=["任务会话 Tasks"])
 
 
+def _default_notification_emails(user_id: str | None) -> list[str]:
+    value = (storage.get_user_settings(user_id) or {}).get("notification_email") or ""
+    return [value.strip()] if value.strip() else []
+
+
+def _task_notification_emails(task: dict, user_id: str | None, explicit: list | None) -> list[str]:
+    if explicit:
+        return [str(email) for email in explicit]
+    stored = task.get("notification_emails") or []
+    return list(stored) if stored else _default_notification_emails(user_id)
+
+
 def _task_public(task: dict) -> dict:
     """去掉内部字段，补上派生信息。"""
     return {
@@ -45,6 +57,7 @@ def _task_public(task: dict) -> dict:
         "waiting_reply": task["status"] == "open" and task["unread_for_agent"] > 0,
         "reply_expires_at": task["reply_expires_at"],
         "token_version": task["token_version"],
+        "notification_emails": task.get("notification_emails") or [],
     }
 
 
@@ -296,16 +309,17 @@ async def post_message(
     principal.require("tasks:write")
     task = _load_task_or_404(task_id, principal)
 
+    to_list = _task_notification_emails(task, principal.user_id, payload.notify_email)
+
     author = payload.author or task.get("agent_name") or principal.name
     message = storage.add_task_message(
         task_id=task_id, role="agent", content=payload.content, author=author, source="api"
     )
 
     result: dict = {"message": message}
-    if payload.notify_email:
+    if to_list:
         # 把这条消息同时以邮件形式推给用户，并自动附带回复链接
         smtp = mailer.smtp_for_user(principal.user_id)
-        to_list = [str(a) for a in payload.notify_email]
         link = replylink.issue_for_task(
             task_id,
             version=task["token_version"],
@@ -346,6 +360,7 @@ async def post_message(
                 task_id=task_id,
                 reply_url=link["reply_url"],
             )
+            storage.set_task_notification_emails(task_id, to_list)
             result["email"] = {"status": "sent", "to": to_list, "message_id": sent.message_id, **link}
         except mailer.MailError as exc:
             storage.insert_mail_log(

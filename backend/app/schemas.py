@@ -13,7 +13,11 @@ class AttachmentIn(BaseModel):
 
 
 class SendMailRequest(BaseModel):
-    to: list[EmailStr] = Field(..., min_length=1, description="收件人，至少一个")
+    to: list[EmailStr] | None = Field(
+        default=None,
+        min_length=1,
+        description="收件人；留空时使用网页设置的默认通知邮箱",
+    )
     subject: str | None = Field(
         default=None, max_length=300, description="主题；使用 template 时可省略"
     )
@@ -158,7 +162,8 @@ class TaskMessageRequest(BaseModel):
     content: str = Field(..., min_length=1, description="消息内容（Markdown 原样存储）")
     author: str | None = Field(default=None, max_length=80, description="显示名，默认取 Agent 名称")
     notify_email: list[EmailStr] | None = Field(
-        default=None, description="可选：同时把这封消息作为邮件发出（会附带回复链接）"
+        default=None,
+        description="可选：覆盖本次通知地址；留空时沿用任务收件人或用户默认通知邮箱",
     )
     notify_subject: str | None = Field(default=None, max_length=300)
 

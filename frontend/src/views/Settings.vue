@@ -24,6 +24,7 @@ const form = reactive({
 const advanced = reactive({
   public_base_url: '',
   test_recipients: '',
+  notification_email: '',
 })
 const effectiveBaseUrl = ref('')
 const globalBaseUrl = ref('')
@@ -49,6 +50,7 @@ async function load() {
 
     advanced.public_base_url = d.public_base_url || ''
     advanced.test_recipients = d.test_recipients || ''
+    advanced.notification_email = d.notification_email || ''
     effectiveBaseUrl.value = d.effective_public_base_url || ''
     globalBaseUrl.value = d.global_public_base_url || ''
     globalSmtp.value = d.global_smtp || {}
@@ -86,6 +88,7 @@ async function save() {
       smtp: smtpPayload(),
       public_base_url: advanced.public_base_url.trim(),
       test_recipients: advanced.test_recipients.trim(),
+      notification_email: advanced.notification_email.trim(),
     })
     effective.value = d.effective_smtp || {}
     effectiveBaseUrl.value = d.effective_public_base_url || ''
@@ -272,6 +275,14 @@ onMounted(load)
         <label class="field-label">测试收件人（逗号分隔）</label>
         <input v-model="advanced.test_recipients" type="text" placeholder="you@example.com, another@example.com" />
         <div class="field-hint">仅用于控制台的「一键测试发信」，不会自动发送</div>
+      </div>
+      <div class="field">
+        <label class="field-label">默认通知邮箱</label>
+        <input v-model="advanced.notification_email" type="email" placeholder="you@example.com" />
+        <div class="field-hint">
+          Agent 发信时可以省略收件人；任务首次发信成功后，后续 Agent 回复会继续通知该任务的收件人。
+          留空则必须由 Agent 每次指定收件人。
+        </div>
       </div>
       <button class="btn btn-primary" :disabled="saving" @click="save">保存设置</button>
     </div>

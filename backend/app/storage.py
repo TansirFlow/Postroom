@@ -151,7 +151,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     agent_message_count INTEGER NOT NULL DEFAULT 0,
     unread_for_agent  INTEGER NOT NULL DEFAULT 0,
     token_version     INTEGER NOT NULL DEFAULT 1,
-    reply_expires_at  TEXT
+    reply_expires_at  TEXT,
+    notification_emails TEXT NOT NULL DEFAULT '[]'
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_updated ON tasks(updated_at DESC);
@@ -190,6 +191,7 @@ MIGRATIONS: dict[str, dict[str, str]] = {
     "tasks": {
         "user_id": "TEXT",
         "conversation_id": "TEXT",
+        "notification_emails": "TEXT NOT NULL DEFAULT '[]'",
     },
     "task_messages": {
         "seq": "INTEGER",
@@ -203,7 +205,7 @@ POST_MIGRATE_INDEXES = (
 )
 
 # 单值设置的键名（不允许出现在 user_settings 里）
-USER_SETTING_KEYS = ("smtp", "public_base_url", "test_recipients")
+USER_SETTING_KEYS = ("smtp", "public_base_url", "test_recipients", "notification_email")
 
 
 def now_iso() -> str:
@@ -915,6 +917,11 @@ def _task_row(row: sqlite3.Row) -> dict[str, Any]:
         task["meta"] = json.loads(task.get("meta") or "{}")
     except json.JSONDecodeError:
         task["meta"] = {}
+    try:
+        emails = json.loads(task.get("notification_emails") or "[]")
+        task["notification_emails"] = [str(email) for email in emails] if isinstance(emails, list) else []
+    except (json.JSONDecodeError, TypeError):
+        task["notification_emails"] = []
     return task
 
 
@@ -927,6 +934,7 @@ def create_task(
     reply_expires_at: str | None = None,
     user_id: str | None = None,
     conversation_id: str | None = None,
+    notification_emails: list[str] | None = None,
 ) -> str:
     task_id = new_id("task")
     stamp = now_iso()
@@ -934,8 +942,8 @@ def create_task(
         conn.execute(
             """INSERT INTO tasks
                (id,user_id,conversation_id,title,agent_name,api_key_name,status,meta,
-                created_at,updated_at,reply_expires_at)
-               VALUES (?,?,?,?,?,?,'open',?,?,?,?)""",
+                created_at,updated_at,reply_expires_at,notification_emails)
+               VALUES (?,?,?,?,?,?,'open',?,?,?,?,?)""",
             (
                 task_id,
                 _owned_user_id(user_id),
@@ -947,6 +955,7 @@ def create_task(
                 stamp,
                 stamp,
                 reply_expires_at,
+                json.dumps(notification_emails or [], ensure_ascii=False),
             ),
         )
         if conversation_id:
@@ -957,6 +966,16 @@ def create_task(
                 (stamp, conversation_id),
             )
     return task_id
+
+
+def set_task_notification_emails(task_id: str, emails: list[str]) -> bool:
+    clean = list(dict.fromkeys(str(email).strip() for email in emails if str(email).strip()))
+    with db() as conn:
+        cur = conn.execute(
+            "UPDATE tasks SET notification_emails = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(clean, ensure_ascii=False), now_iso(), task_id),
+        )
+    return cur.rowcount > 0
 
 
 def get_task(

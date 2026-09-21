@@ -7,6 +7,7 @@
 - ``smtp``            —— 该用户自己的发信通道；留空（host 为空）则回落到服务器 .env 的全局配置
 - ``public_base_url`` —— 该用户回复链接的对外根地址（多域名/多站点时特别有用）
 - ``test_recipients`` —— 该用户自己的测试收件人
+- ``notification_email`` —— 该用户默认的任务通知邮箱
 
 写入需要网页登录会话（人操作）；Agent 只需要能发信，不需要改服务器设置。
 """
@@ -15,7 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .. import storage
 from ..config import settings as app_settings
@@ -56,6 +57,18 @@ class SettingsUpdateRequest(BaseModel):
     smtp: SmtpIn | None = Field(default=None, description="传 null 表示清空，回落到服务器全局 SMTP")
     public_base_url: str | None = Field(default=None, max_length=200)
     test_recipients: str | None = Field(default=None, max_length=1000)
+    notification_email: str | None = Field(default=None, max_length=320)
+
+    @field_validator("notification_email")
+    @classmethod
+    def validate_notification_email(cls, value: str | None) -> str | None:
+        value = (value or "").strip()
+        if not value:
+            return ""
+        from pydantic import TypeAdapter
+        from pydantic.networks import EmailStr
+
+        return str(TypeAdapter(EmailStr).validate_python(value))
 
 
 class SmtpTestRequest(BaseModel):
@@ -103,6 +116,7 @@ async def read_settings(request: Request, principal: Principal = Depends(current
             "global_public_base_url": app_settings.public_base_url,
             "test_recipients": saved.get("test_recipients") or "",
             "global_test_recipients": app_settings.test_recipient_list,
+            "notification_email": saved.get("notification_email") or "",
             "password_hint": "SMTP 密码仅存服务端数据库，接口只返回是否已设置；留空表示不修改",
         },
     )
@@ -146,6 +160,9 @@ async def update_settings(
     if payload.test_recipients is not None:
         data["test_recipients"] = payload.test_recipients.strip()
 
+    if "notification_email" in payload.model_fields_set:
+        data["notification_email"] = payload.notification_email or ""
+
     storage.save_user_settings(user_id, data)
     effective = mailer.smtp_for_user(user_id)
     return ok(
@@ -156,6 +173,7 @@ async def update_settings(
             "effective_smtp": effective.public(),
             "public_base_url": storage.get_user_settings(user_id).get("public_base_url") or "",
             "effective_public_base_url": mailer.base_url_for_user(user_id, request),
+            "notification_email": storage.get_user_settings(user_id).get("notification_email") or "",
         },
     )
 

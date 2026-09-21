@@ -36,7 +36,7 @@ def _tools(base: str) -> list[dict]:
             "to": {
                 "type": "array",
                 "items": {"type": "string", "format": "email"},
-                "description": "收件人邮箱列表，至少一个",
+                "description": "收件人邮箱列表；留空时使用网页设置的默认通知邮箱",
             },
             "subject": {"type": "string", "description": "邮件主题，最长 300 字；使用 template 时可省略"},
             "body": {"type": "string", "description": "纯文本正文"},
@@ -98,7 +98,7 @@ def _tools(base: str) -> list[dict]:
                 "description": "task_id 存在时是否追加回复链接，默认追加",
             },
         },
-        "required": ["to"],
+        "required": [],
     }
 
     return _normalize(
@@ -110,7 +110,7 @@ def _tools(base: str) -> list[dict]:
                 "description": (
                     "通过配置好的 SMTP 账号发送一封邮件。支持纯文本/HTML 正文、抄送密送、"
                     "base64 附件，以及内置模板。返回发送结果与记录 id。"
-                    "想收用户回信就带上 conversation_id 或 external_id（自动开线程并附回复链接）。"
+                    "未传 to 时使用网页设置的默认通知邮箱；想收用户回信就带上 conversation_id 或 external_id（自动开线程并附回复链接）。"
                 ),
                 "parameters": send_params,
                 "endpoint": f"{base}/api/v1/mail/send",
@@ -320,6 +320,7 @@ def _tools(base: str) -> list[dict]:
                 "description": (
                     "向任务会话追加一条 Agent 消息。可选 notify_email：同一条消息"
                     "直接以邮件推给用户（自动附带回复链接），无需再单独调 send_email。"
+                    "未传时沿用该任务首次发信的收件人，再回落到网页设置的默认通知邮箱。"
                 ),
                 "parameters": {
                     "type": "object",
@@ -330,7 +331,7 @@ def _tools(base: str) -> list[dict]:
                         "notify_email": {
                             "type": "array",
                             "items": {"type": "string", "format": "email"},
-                            "description": "可选：同时邮件通知这些地址",
+                            "description": "可选：覆盖本次通知地址；留空时沿用任务收件人或默认通知邮箱",
                         },
                         "notify_subject": {"type": "string"},
                     },

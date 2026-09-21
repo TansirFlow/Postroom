@@ -14,8 +14,8 @@ const steps = [
     title: '配好发信通道',
     badge: '必做',
     badgeClass: 'badge-warn',
-    text: '打开「系统设置 → 邮件通道」，填 SMTP 主机 / 端口 / 认证账号 / 认证密码，按服务商选 SSL（465）或 STARTTLS（587）。先点「测试连接」，看到成功提示后再「保存设置」。',
-    hint: '认证密码一般是邮箱服务商生成的「应用专用密码」，不是网页登录密码。没配好之前，所有发信都会直接返回 smtp_not_configured。每个账号用各自的通道，互不影响。',
+    text: '打开「系统设置 → 邮件通道」，填 SMTP 主机 / 端口 / 认证账号 / 认证密码，并填写默认通知邮箱。按服务商选 SSL（465）或 STARTTLS（587）。先点「测试连接」，看到成功提示后再「保存设置」。',
+    hint: '认证密码一般是邮箱服务商生成的「应用专用密码」，不是网页登录密码。默认通知邮箱用于 Agent 省略收件人时的任务邮件，以及后续回复通知。每个账号用各自的通道，互不影响。',
     to: '/settings',
     linkText: '去系统设置',
   },
@@ -47,7 +47,7 @@ const pages = [
   { name: '发送记录', path: '/logs', desc: '每封信的状态、耗时与失败原因（含 SMTP 原始错误）' },
   { name: '接口文档 / Agent 工具', path: '/docs', desc: 'Agent 工具清单 + cURL / Python / Node 示例 + 完整错误码' },
   { name: 'API 密钥', path: '/keys', desc: '给 Agent 用的密钥；可启用、停用、删除' },
-  { name: '系统设置', path: '/settings', desc: '本账号的 SMTP、对外地址（决定回复链接域名）、测试收件人、修改密码' },
+  { name: '系统设置', path: '/settings', desc: '本账号的 SMTP、默认通知邮箱、对外地址、测试收件人、修改密码' },
   {
     name: '用户管理',
     path: '/users',
@@ -59,7 +59,7 @@ const pages = [
 // ---------------------------------------------------------------- 对话 + 拉取闭环
 const flow = [
   { t: 'Agent 开对话', c: 'POST /api/v1/conversations', d: '带上 Agent 侧的对话标识（external_id），同一个标识重复调用只会复用，不会重复建' },
-  { t: 'Agent 发邮件', c: 'POST /api/v1/mail/send', d: '带 "conversation_id"（或 external_id）：自动开一条线程，正文追加「点开即回复」按钮' },
+  { t: 'Agent 发邮件', c: 'POST /api/v1/mail/send', d: '带 "conversation_id"（或 external_id）：自动开一条线程，正文追加「点开即回复」按钮；省略 to 时使用默认通知邮箱' },
   { t: 'Agent 不等', c: '—', d: '任务不会被自动关闭，回复链接默认 30 天有效；Agent 可以继续干别的对话' },
   { t: '收件人回帖', c: '打开邮件里的链接', d: '免登录网页对话，链接本身即凭证；隔几天再回也行' },
   { t: '定时任务拉取', c: 'GET /api/v1/inbox', d: 'cron 每 30 秒一次取走全部对话的增量回复，按 conversation_id 分发回各自对话' },
@@ -72,6 +72,7 @@ const flowNotes = [
   '先分发、后 ack：中途崩了最多重复投递一次，不会漏。水位只增不减，传旧值不会回退。',
   '链接可轮换：POST /tasks/{id}/reply-link 让旧链接立即失效；关闭对话或任务后不能再回帖（仍可只读查看）。',
   '「对外地址」（系统设置）决定邮件里链接的域名。填成本机地址，收件人就点不开了。',
+  '在「系统设置」填写默认通知邮箱后，Agent 可以省略 to；任务首次发信成功后，后续 post_task_message 会继续发到该任务的收件人。',
   '同一任务回帖限流 60 条/小时；单条消息长度上限由服务端 MESSAGE_MAX_CHARS 控制。',
 ]
 
@@ -130,12 +131,14 @@ const startupPrompt = computed(() => `你是通过 Postroom 与人协作的 AI A
      → 记下返回的 conversation_id
   3. 需要人确认或回复时，在这个对话下发邮件：
      POST /api/v1/mail/send
-     {"conversation_id": "<上一步的 id>", "thread_title": "标题", "to": [...], "subject": "...", "body": "..."}
+     {"conversation_id": "<上一步的 id>", "thread_title": "标题", "subject": "...", "body": "..."}
+     → 如果没有在请求中提供 to，服务端会使用网页「系统设置」里的默认通知邮箱
      → 邮件正文会自动追加「点开即回复」按钮，不要自己拼 reply_url
   4. 发完邮件后继续执行主任务，不要长轮询、不要等待用户。用户回复由另一段“定时拉取提示词”处理。
   5. 需要主动补充消息或通知对方时：
      POST /api/v1/tasks/<task_id>/messages
-     {"content": "要回复的话", "notify_email": ["someone@example.com"]}
+     {"content": "要回复的话"}
+     → 默认沿用该任务首次发信的收件人；也可以传 notify_email 临时覆盖本次通知地址
   6. 任务完成后收尾：
      POST /api/v1/conversations/<conversation_id>/close
      或 POST /api/v1/tasks/<task_id>/close

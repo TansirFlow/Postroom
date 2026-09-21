@@ -26,7 +26,7 @@ const endpoints = [
   { method: 'GET', path: '/api/v1/tasks', scope: 'tasks:read', desc: '任务列表（可按 conversation_id 过滤）' },
   { method: 'GET', path: '/api/v1/tasks/{id}', scope: 'tasks:read', desc: '任务详情 + 会话线程 + 回复链接' },
   { method: 'PATCH', path: '/api/v1/tasks/{id}', scope: 'tasks:write', desc: '改标题 / 状态 / 上下文' },
-  { method: 'POST', path: '/api/v1/tasks/{id}/messages', scope: 'tasks:write', desc: 'Agent 发消息（可顺带邮件通知）' },
+  { method: 'POST', path: '/api/v1/tasks/{id}/messages', scope: 'tasks:write', desc: 'Agent 发消息（沿用任务/默认通知邮箱自动邮件通知）' },
   { method: 'GET', path: '/api/v1/tasks/{id}/messages', scope: 'tasks:read', desc: '单线程读取（after_id 增量；跨对话用 /inbox）' },
   { method: 'POST', path: '/api/v1/tasks/{id}/reply-link', scope: 'tasks:write', desc: '轮换回复链接（旧链接立即失效）' },
   { method: 'POST', path: '/api/v1/tasks/{id}/close', scope: 'tasks:write', desc: '关闭任务' },

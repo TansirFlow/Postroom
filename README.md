@@ -48,7 +48,7 @@ postroom/
 ├─ frontend/                    # Vue 3 + Vite 控制台
 │  └─ src/{App.vue,components/*,views/*,api.js,router.js,styles.css}
 ├─ tests/
-│  └─ test_task_flow.py         # 对话/收件箱 + 回复链接 + 多用户隔离端到端回归（自清理，162 项断言）
+│  └─ test_task_flow.py         # 对话/收件箱 + 回复链接 + 多用户隔离端到端回归（自清理，163 项断言）
 ├─ screenshots/                 # 登录页 / 使用教程 / 控制台 / 设置 / 用户管理 / 回复页截图
 ├─ LICENSE                      # MIT
 ├─ run-backend.cmd              # Windows 一键启动后端
@@ -203,7 +203,7 @@ API Key 的鉴权哈希仍用于校验，同时额外保存一份由站点签名
 | 任务会话 | `tasks.user_id`，别人的 `task_id` 一律返回 `404 task_not_found`（不泄露存在性） |
 | 对话 | `conversations.user_id`；`external_id` 的唯一索引也是**按账号**的，所以两个账号可以用同一个 `external_id` 各建各的对话，别人的 `conversation_id` 一律 `404 conversation_not_found` |
 | 收件箱拉取进度 | `inbox_watermarks.owner`（= API Key 内部 ID）+ `user_id`，**按密钥隔离**；一把密钥 ack 不会推进另一把的水位 |
-| SMTP / 对外地址 / 测试收件人 | `user_settings` 表，一行一个账号 |
+| SMTP / 对外地址 / 测试收件人 / 默认通知邮箱 | `user_settings` 表，一行一个账号 |
 | 用户账号 | `users` 表，`role` = `admin` / `user` |
 
 管理员**看不到**别人的邮件、任务与密钥——他只能管理**账号本身**。这是刻意的：管理员是运维角色，不是数据上帝。
@@ -232,7 +232,7 @@ API Key 的鉴权哈希仍用于校验，同时额外保存一份由站点签名
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `to` | string[] | ✅ | 收件人 |
+| `to` | string[] | 条件 | 收件人；留空时使用「系统设置」里的默认通知邮箱 |
 | `subject` | string | 条件 | 用 `template` 时可省略，否则必填 |
 | `body` | string | 条件 | 纯文本正文 |
 | `html` | string | 条件 | HTML 正文；与 `body` 同时给出则生成多部分邮件 |
@@ -285,6 +285,9 @@ curl -X POST http://127.0.0.1:8077/api/v1/mail/send \
 "data": { "...": "...", "task_id": "task_8e7f9927b389", "reply_url": "http://127.0.0.1:8077/reply/eyJ0Ijo..." }
 ```
 
+如果网页「系统设置」已经填写了默认通知邮箱，`to` 可以省略；带 `task_id` 时还会优先沿用该任务首次发信成功记录的收件人。
+因此用户回帖后，Agent 再调用 `POST /api/v1/tasks/{id}/messages` 且不传 `notify_email`，系统也会继续邮件通知同一个收件人。
+
 ### 其他接口
 
 | 方法 | 路径 | 权限 | 说明 |
@@ -299,7 +302,7 @@ curl -X POST http://127.0.0.1:8077/api/v1/mail/send \
 | GET | `/api/v1/auth/me` | 任意 | 当前登录身份与权限 |
 | POST | `/api/v1/auth/password` | 网页会话 | 修改自己的密码（旧会话全部失效） |
 | GET | `/api/v1/settings` | `mail:send` / `mail:read` | 读取本账号设置（SMTP 只回 `password_set` 标志） |
-| PUT | `/api/v1/settings` | 网页会话 | 保存本账号 SMTP / 对外地址 / 测试收件人 |
+| PUT | `/api/v1/settings` | 网页会话 | 保存本账号 SMTP / 对外地址 / 测试收件人 / 默认通知邮箱 |
 | POST | `/api/v1/settings/smtp-test` | 网页会话 | 测试 SMTP 连通性（可先测未保存的配置） |
 | GET/POST/PATCH/DELETE | `/api/v1/users...` | `users:manage` | 用户管理（仅管理员） |
 | GET | `/api/v1/mail/logs` | `mail:read` | 分页查询（`page` / `page_size` / `status` / `q`） |
@@ -437,7 +440,7 @@ http://127.0.0.1:8077/reply/eyJ0IjoidGFza18wN2EwYjk2NTQy...
 | GET | `/api/v1/tasks` | `tasks:read` | 任务列表（`page` / `page_size` / `status` / `q` / `conversation_id`）+ 全局 `stats` |
 | GET | `/api/v1/tasks/{id}` | `tasks:read` | 任务详情 + 会话线程 |
 | PATCH | `/api/v1/tasks/{id}` | `tasks:write` | 改标题 / Agent 名 / 状态 / 上下文 / 转挂对话 |
-| POST | `/api/v1/tasks/{id}/messages` | `tasks:write` | Agent 发消息；`notify_email: ["a@b.com"]` 可同时推一份邮件（自动带链接） |
+| POST | `/api/v1/tasks/{id}/messages` | `tasks:write` | Agent 发消息；留空 `notify_email` 会沿用任务收件人或默认通知邮箱，并自动发邮件 |
 | POST | `/api/v1/tasks/{id}/close` | `tasks:write` | 关闭任务（回帖随即被拒） |
 | POST | `/api/v1/tasks/{id}/reopen` | `tasks:write` | 重新打开 |
 | POST | `/api/v1/tasks/{id}/reply-link` | `tasks:write` | **轮换链接：此前发出的所有链接立即失效**（token 版本号 +1） |
@@ -674,7 +677,7 @@ AGENT_API_KEY=sk-agent-xxxxx TEST_RECIPIENT=you@example.com \
   backend/.venv/Scripts/python.exe tests/test_task_flow.py --send
 ```
 
-覆盖 **162 项断言**，全程自清理（建的对话、任务、账号都会删掉）：
+覆盖 **163 项断言**，全程自清理（建的对话、任务、账号都会删掉）：
 
 | 段落 | 内容 |
 | --- | --- |

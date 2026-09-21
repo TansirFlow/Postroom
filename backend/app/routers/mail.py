@@ -30,6 +30,11 @@ def _test_recipients(user_id: str | None) -> list[str]:
     return items or settings.test_recipient_list
 
 
+def _default_notification_email(user_id: str | None) -> str | None:
+    value = (storage.get_user_settings(user_id) or {}).get("notification_email") or ""
+    return value.strip() or None
+
+
 @router.post("/send", summary="发送邮件（agent 主入口）")
 async def send_mail(
     payload: SendMailRequest,
@@ -37,6 +42,16 @@ async def send_mail(
     principal: Principal = Depends(current_principal),
 ):
     principal.require("mail:send")
+
+    configured_email = _default_notification_email(principal.user_id)
+    if not payload.to and not payload.task_id and not configured_email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=fail(
+                "missing_recipients",
+                "请提供收件人，或先在网页「系统设置」中配置默认通知邮箱",
+            ),
+        )
 
     # 该用户自己的 SMTP（未配置则回落服务器全局）
     smtp = mailer.smtp_for_user(principal.user_id)
@@ -203,7 +218,21 @@ async def send_mail(
             title=task.get("title"),
         )
 
-    to_list = [str(a) for a in payload.to]
+    if payload.to:
+        to_list = [str(a) for a in payload.to]
+    elif task and task.get("notification_emails"):
+        to_list = list(task["notification_emails"])
+    elif configured_email:
+        to_list = [configured_email]
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=fail(
+                "missing_recipients",
+                "请提供收件人，或先在网页「系统设置」中配置默认通知邮箱",
+            ),
+        )
+
     cc_list = [str(a) for a in (payload.cc or [])]
     bcc_list = [str(a) for a in (payload.bcc or [])]
     att_meta = [
@@ -274,6 +303,10 @@ async def send_mail(
         size_bytes=result.size_bytes,
         attempts=result.attempts,
     )
+
+    if resolved_task_id:
+        # 首次发信确定该任务线程的通知目标；后续 post_task_message 会沿用它。
+        storage.set_task_notification_emails(resolved_task_id, to_list)
 
     # 记入任务会话：这样用户在回复页就能看到 Agent 发过的邮件内容
     if task:

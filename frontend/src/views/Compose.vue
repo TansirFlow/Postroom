@@ -24,6 +24,7 @@ const apiOrigin = window.location.origin
 const templateVars = ref({})
 const attachments = ref([])
 const testRecipients = ref([])
+const defaultNotificationEmail = ref('')
 const sending = ref(false)
 const result = ref(null)
 const error = ref('')
@@ -51,7 +52,9 @@ function isRecipientOn(addr) {
 }
 
 function buildPayload() {
-  const payload = { to: parseList(form.to) }
+  const payload = {}
+  const recipients = parseList(form.to)
+  if (recipients.length) payload.to = recipients
   if (form.subject.trim()) payload.subject = form.subject.trim()
   if (form.cc.trim()) payload.cc = parseList(form.cc)
   if (form.bcc.trim()) payload.bcc = parseList(form.bcc)
@@ -130,8 +133,8 @@ async function copyText(text) {
 async function send() {
   error.value = ''
   result.value = null
-  if (!parseList(form.to).length) {
-    error.value = '请至少填写一个收件人'
+  if (!parseList(form.to).length && !defaultNotificationEmail.value) {
+    error.value = '请填写收件人，或先在系统设置中配置默认通知邮箱'
     return
   }
   if (form.mode === 'template' && !form.template) {
@@ -169,13 +172,15 @@ async function send() {
 
 async function loadMeta() {
   try {
-    const [tpl, rec, taskList] = await Promise.all([
+    const [tpl, rec, taskList, setting] = await Promise.all([
       api.get('/api/v1/mail/templates'),
       api.get('/api/v1/mail/test-recipients'),
       api.get('/api/v1/tasks?status=open&page_size=50').catch(() => ({ items: [] })),
+      api.get('/api/v1/settings').catch(() => ({})),
     ])
     templates.value = tpl
     testRecipients.value = rec.recipients || []
+    defaultNotificationEmail.value = setting.notification_email || ''
     tasks.value = taskList.items || []
     form.template = templates.value[0]?.name || ''
     applyTemplate(form.template)
@@ -222,8 +227,9 @@ onMounted(loadMeta)
           <div v-if="error" class="banner banner-err" style="margin-bottom: 14px">{{ error }}</div>
 
           <div class="field">
-            <label class="field-label">收件人 *</label>
-            <input v-model="form.to" type="text" placeholder="多个地址用逗号分隔" />
+            <label class="field-label">收件人</label>
+            <input v-model="form.to" type="text" placeholder="留空使用默认通知邮箱；多个地址用逗号分隔" />
+            <div class="field-hint">默认通知邮箱：{{ defaultNotificationEmail || '未设置' }}</div>
             <div class="chips" style="margin-top: 7px">
               <span class="small muted" style="align-self: center">快捷：</span>
               <span
