@@ -32,6 +32,21 @@ class SendMailRequest(BaseModel):
         default=None,
         description="关联任务 ID。提供后邮件正文会自动附带「免登录回复链接」，并把本封内容记入任务会话",
     )
+    conversation_id: str | None = Field(
+        default=None,
+        description=(
+            "所属对话 ID。不传 task_id 时，服务端会在这个对话下自动新建一条任务线程，"
+            "并把回复链接织进正文 —— 一个对话可以按需发多封邮件"
+        ),
+    )
+    external_id: str | None = Field(
+        default=None,
+        max_length=200,
+        description="便捷写法：只给 Agent 侧的对话标识，服务端自动 ensure 会话（没有就建、有就复用）",
+    )
+    thread_title: str | None = Field(
+        default=None, max_length=200, description="自动新建任务线程时使用的标题"
+    )
     attach_reply_link: bool = Field(
         default=True, description="task_id 存在时是否追加回复链接（默认追加）"
     )
@@ -85,6 +100,46 @@ class TaskCreateRequest(BaseModel):
     reply_expires_days: int | None = Field(
         default=None, ge=1, le=365, description="回复链接有效期（天），默认取服务端配置"
     )
+    conversation_id: str | None = Field(default=None, description="所属对话 ID")
+    external_id: str | None = Field(
+        default=None,
+        max_length=200,
+        description=(
+            "便捷写法：Agent 侧的对话标识（如 codex 的会话 id）。"
+            "服务端按 (账号, external_id) 幂等 ensure 一个对话：没有就建，有就复用"
+        ),
+    )
+
+
+class ConversationEnsureRequest(BaseModel):
+    external_id: str | None = Field(
+        default=None,
+        max_length=200,
+        description=(
+            "Agent 侧的对话标识，同一账号下唯一。重复提交同一个值会**复用**已有对话"
+            "（created=false），因此定时任务重启后不需要自己记住 conversation_id"
+        ),
+    )
+    title: str | None = Field(default=None, max_length=200)
+    agent_name: str | None = Field(default=None, max_length=80)
+    meta: dict[str, Any] | None = None
+
+
+class ConversationPatchRequest(BaseModel):
+    title: str | None = Field(default=None, max_length=200)
+    agent_name: str | None = Field(default=None, max_length=80)
+    status: Literal["open", "closed"] | None = None
+    external_id: str | None = Field(default=None, max_length=200)
+    meta: dict[str, Any] | None = None
+
+
+class InboxAckRequest(BaseModel):
+    upto_seq: int = Field(
+        ..., ge=0, description="已成功分发到各对话的最大 seq（即上一次拉取返回的 next_cursor）"
+    )
+    mark_read: bool = Field(
+        default=True, description="是否同时把控制台的待回复计数清零（默认清）"
+    )
 
 
 class TaskPatchRequest(BaseModel):
@@ -92,6 +147,7 @@ class TaskPatchRequest(BaseModel):
     agent_name: str | None = Field(default=None, max_length=80)
     status: Literal["open", "closed"] | None = None
     meta: dict[str, Any] | None = None
+    conversation_id: str | None = Field(default=None, description="改挂到另一个对话")
 
 
 class TaskMessageRequest(BaseModel):

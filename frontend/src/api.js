@@ -193,10 +193,11 @@ export function fmtBytes(n) {
 /** 免登录回复页专用：链接本身即凭证，不携带任何登录态。 */
 export const replyApi = {
   open: (token) => request(`/api/v1/reply/${encodeURIComponent(token)}`, { auth: false }),
-  poll: (token, afterId, waitSeconds = 25) => {
+  // 服务端已不做长轮询（回复由 Agent 侧的定时任务从 /api/v1/inbox 拉取），
+  // 这里只做一次增量查询，由页面自己控制刷新间隔。
+  poll: (token, afterId) => {
     const p = new URLSearchParams()
     if (afterId) p.set('after_id', afterId)
-    if (waitSeconds) p.set('wait_seconds', waitSeconds)
     return request(`/api/v1/reply/${encodeURIComponent(token)}/messages?${p}`, { auth: false })
   },
   send: (token, content, author) =>

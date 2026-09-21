@@ -13,18 +13,26 @@ const endpoints = [
   { method: 'GET', path: '/api/v1/agent/manifest', scope: '—', desc: '服务能力摘要与快速上手代码' },
   { method: 'GET', path: '/api/v1/whoami', scope: '任意', desc: '校验当前 Key 与权限' },
   { method: 'GET', path: '/api/v1/overview', scope: 'mail:read', desc: '控制台概览数据' },
+  { method: 'POST', path: '/api/v1/conversations', scope: 'tasks:write', desc: '幂等创建/复用对话（Agent 侧一个对话调一次）' },
+  { method: 'GET', path: '/api/v1/conversations', scope: 'tasks:read', desc: '对话列表（含未读统计）' },
+  { method: 'GET', path: '/api/v1/conversations/{id}', scope: 'tasks:read', desc: '对话详情 + 其下任务线程' },
+  { method: 'PATCH', path: '/api/v1/conversations/{id}', scope: 'tasks:write', desc: '改标题 / 状态 / 外部标识' },
+  { method: 'POST', path: '/api/v1/conversations/{id}/close', scope: 'tasks:write', desc: '关闭对话（旗下线程一起失效）' },
+  { method: 'GET', path: '/api/v1/inbox', scope: 'tasks:read', desc: '★ 增量拉取全部对话的用户回复（定时任务入口，非阻塞）' },
+  { method: 'POST', path: '/api/v1/inbox/ack', scope: 'tasks:write', desc: '推进拉取水位（只增不减，重复提交安全）' },
+  { method: 'GET', path: '/api/v1/inbox/stats', scope: 'tasks:read', desc: '还有多少回复没取走' },
   { method: 'POST', path: '/api/v1/mail/send', scope: 'mail:send', desc: '发送邮件（支持 HTML / 附件 / 模板 / 幂等）' },
-  { method: 'POST', path: '/api/v1/tasks', scope: 'tasks:write', desc: '创建任务，拿到 task_id 与免登录回复链接' },
-  { method: 'GET', path: '/api/v1/tasks', scope: 'tasks:read', desc: '任务列表（含待回复统计）' },
+  { method: 'POST', path: '/api/v1/tasks', scope: 'tasks:write', desc: '创建任务线程，拿到 task_id 与免登录回复链接' },
+  { method: 'GET', path: '/api/v1/tasks', scope: 'tasks:read', desc: '任务列表（可按 conversation_id 过滤）' },
   { method: 'GET', path: '/api/v1/tasks/{id}', scope: 'tasks:read', desc: '任务详情 + 会话线程 + 回复链接' },
   { method: 'PATCH', path: '/api/v1/tasks/{id}', scope: 'tasks:write', desc: '改标题 / 状态 / 上下文' },
   { method: 'POST', path: '/api/v1/tasks/{id}/messages', scope: 'tasks:write', desc: 'Agent 发消息（可顺带邮件通知）' },
-  { method: 'GET', path: '/api/v1/tasks/{id}/messages', scope: 'tasks:read', desc: '取用户回复，支持 wait_seconds 长轮询' },
+  { method: 'GET', path: '/api/v1/tasks/{id}/messages', scope: 'tasks:read', desc: '单线程读取（after_id 增量；跨对话用 /inbox）' },
   { method: 'POST', path: '/api/v1/tasks/{id}/reply-link', scope: 'tasks:write', desc: '轮换回复链接（旧链接立即失效）' },
   { method: 'POST', path: '/api/v1/tasks/{id}/close', scope: 'tasks:write', desc: '关闭任务' },
   { method: 'DELETE', path: '/api/v1/tasks/{id}', scope: 'tasks:write', desc: '删除任务及会话消息（不可恢复）' },
   { method: 'GET', path: '/api/v1/reply/{token}', scope: '免鉴权', desc: '免登录：打开会话（链接即凭证）' },
-  { method: 'GET', path: '/api/v1/reply/{token}/messages', scope: '免鉴权', desc: '免登录：增量拉取新消息（长轮询）' },
+  { method: 'GET', path: '/api/v1/reply/{token}/messages', scope: '免鉴权', desc: '免登录：增量拉取新消息' },
   { method: 'POST', path: '/api/v1/reply/{token}', scope: '免鉴权', desc: '免登录：用户回信' },
   { method: 'GET', path: '/api/v1/reply/{token}/link', scope: '免鉴权', desc: '免登录：旧链接自助换新链接' },
   { method: 'GET', path: '/api/v1/mail/logs', scope: 'mail:read', desc: '分页查询发送记录' },
@@ -61,7 +69,7 @@ function buildSnippets(key) {
     "to": ["you@example.com"],
     "subject": "任务完成通知",
     "body": "2026-Q3 报表已生成，环比 +18.4%",
-    "idempotency_key": "train-200k-done"
+    "idempotency_key": "deploy-report-q3"
   }'`,
     python: `import requests
 
@@ -119,42 +127,46 @@ import requests
 API, KEY = "${base.value}", "${key}"
 H = {"X-API-Key": KEY}
 
-# ① 任务启动，拿到 task_id
-task = requests.post(f"{API}/api/v1/tasks", headers=H, json={
+# ① 定时任务开局：按 Agent 侧的对话标识幂等拿一个 conversation_id
+#    同一个 external_id 重复调用只会复用已有对话，进程重启也不用记住 id
+conv = requests.post(f"{API}/api/v1/conversations", headers=H, json={
+    "external_id": "codex:2026Q3-report",     # 换成你自己的对话标识
     "title": "季度数据报表生成",
-    "agent_name": "ReportBot",
-    "meta": {"period": "2026-Q3", "report_id": "rpt_2026Q3"},
+    "agent_name": "DeployBot",
 }).json()["data"]
-tid = task["task_id"]
-print("回复链接:", task["reply_url"])   # 也可以自己塞进邮件模板
+cid = conv["conversation_id"]
+print("对话:", cid, "新建" if conv["created"] else "复用")
 
-# ② 发邮件：正文会自动追加「点开即回复」按钮
-requests.post(f"{API}/api/v1/mail/send", headers=H, json={
+# ② 在这个对话下开一条线程并发信：正文会自动追加「点开即回复」按钮
+sent = requests.post(f"{API}/api/v1/mail/send", headers=H, json={
     "to": ["someone@example.com"],
-    "task_id": tid,
+    "conversation_id": cid,                   # 也可只给 external_id
+    "thread_title": "报表是否推送",
     "subject": "报表已生成，是否推送？",
     "body": "2026-Q3 报表已生成，总记录数 1,284,930，环比 +18.4%。要推送到正式库吗？",
-})
+}).json()["data"]
+print("线程:", sent["task_id"], "回复链接:", sent["reply_url"])
 
-# ③ 等用户回复（长轮询，最长阻塞 60s，不用空转）
-replies = requests.get(
-    f"{API}/api/v1/tasks/{tid}/messages",
-    headers=H,
-    params={"role": "user", "wait_seconds": 55},
-    timeout=90,
-).json()["data"]["messages"]
+# ③ 干别的去 —— 不用等用户，任务不会被自动关闭，回复链接默认 30 天有效
 
-for msg in replies:
-    print("用户说:", msg["content"])
+# ④ 定时任务（cron 每 30 秒）：一次拉走**全部对话**的增量回复，再按对话分发
+#    不传 cursor 就用服务端水位；进程重启也不会重复投递
+inbox = requests.get(f"{API}/api/v1/inbox", headers=H).json()["data"]
+for item in inbox["items"]:
+    print(f"[{item['conversation_external_id']}] {item['author']}: {item['content']}")
 
-# ④ 回一句（可顺带邮件通知，同样自动带回复链接）
-requests.post(f"{API}/api/v1/tasks/{tid}/messages", headers=H, json={
+# ⑤ 分发成功后推进水位（只增不减，重复提交安全）
+requests.post(f"{API}/api/v1/inbox/ack", headers=H,
+              json={"upto_seq": inbox["next_cursor"]})
+
+# ⑥ 回一句（可顺带邮件通知，同样自动带回复链接）
+requests.post(f"{API}/api/v1/tasks/{sent['task_id']}/messages", headers=H, json={
     "content": "收到，已开始推送。",
     "notify_email": ["someone@example.com"],
 })
 
-# ⑤ 收尾：关闭任务，回复链接随之失效
-requests.post(f"{API}/api/v1/tasks/{tid}/close", headers=H)`,
+# ⑦ 收尾：关闭对话，旗下线程的回复链接一起失效
+requests.post(f"{API}/api/v1/conversations/{cid}/close", headers=H)`,
   }
 }
 
@@ -280,7 +292,7 @@ onMounted(loadTools)
             <div class="tab" :class="{ active: snippetTab === 'python' }" @click="snippetTab = 'python'">Python</div>
             <div class="tab" :class="{ active: snippetTab === 'node' }" @click="snippetTab = 'node'">Node</div>
             <div class="tab" :class="{ active: snippetTab === 'agent' }" @click="snippetTab = 'agent'">接入 Agent</div>
-            <div class="tab" :class="{ active: snippetTab === 'flow' }" @click="snippetTab = 'flow'">任务闭环</div>
+            <div class="tab" :class="{ active: snippetTab === 'flow' }" @click="snippetTab = 'flow'">拉取闭环</div>
           </div>
           <pre class="code">{{ snippets[snippetTab] }}</pre>
         </div>
@@ -303,6 +315,7 @@ onMounted(loadTools)
               <tr><td class="mono">token_expired</td><td class="small">回复链接已过期，需 Agent 重发（401）</td></tr>
               <tr><td class="mono">token_revoked</td><td class="small">回复链接已被轮换吊销（401）</td></tr>
               <tr><td class="mono">task_closed</td><td class="small">任务已关闭，不能再回帖（403）</td></tr>
+              <tr><td class="mono">conversation_not_found</td><td class="small">对话不存在，或不属于当前账号（404）</td></tr>
               <tr><td class="mono">reply_rate_limited</td><td class="small">该任务回帖过于频繁（429）</td></tr>
             </tbody>
           </table>

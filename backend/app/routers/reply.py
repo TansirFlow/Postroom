@@ -3,10 +3,12 @@
 
 令牌里只有「任务 + 版本 + 过期时间」，并由服务端密钥签名，
 因此拿到链接的人只能看/回这一条会话，无法触达其它任务。
+
+这里只管「收下用户的话」——Agent 侧不在这里等，也不长轮询；
+定时任务用 GET /api/v1/inbox 增量拉取后按 conversation_id 分发回各对话。
 """
 from __future__ import annotations
 
-import asyncio
 import time
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
@@ -78,19 +80,14 @@ async def open_session(
     )
 
 
-@router.get("/{token}/messages", summary="增量拉取新消息（可长轮询）")
+@router.get("/{token}/messages", summary="增量拉取新消息（不阻塞，用户页面前的主动刷新用）")
 async def poll_messages(
     token: str,
     request: Request,
     after_id: str | None = Query(None),
-    wait_seconds: int = Query(0, ge=0, le=60),
 ):
     task, payload = _resolve(token)
-    deadline = time.monotonic() + wait_seconds
     messages = storage.list_task_messages(task["id"], after_id=after_id, limit=300)
-    while not messages and wait_seconds > 0 and time.monotonic() < deadline:
-        await asyncio.sleep(1.5)
-        messages = storage.list_task_messages(task["id"], after_id=after_id, limit=300)
     return ok(
         request,
         {
@@ -155,8 +152,9 @@ async def post_reply(
             "message": message,
             "session": _session(task, token_payload),
             "agent_hint": (
-                f"Agent 可通过 GET /api/v1/tasks/{task['id']}/messages?after_id={message['id']}"
-                " 或长轮询 wait_seconds=30 取回该回复。"
+                "回复已入库，Agent 会在下一次定时拉取时取走："
+                f"GET /api/v1/inbox（或本线程增量 GET /api/v1/tasks/{task['id']}/messages"
+                f"?after_id={message['id']}）。你随时可以再回来补充或调整方向。"
             ),
         },
     )

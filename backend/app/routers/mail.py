@@ -108,8 +108,16 @@ async def send_mail(
         )
 
     # ---- 关联任务：把「免登录回复链接」织进正文 ----
+    # 三种写法：
+    #   1) 给 task_id        → 挂到已有任务线程
+    #   2) 给 conversation_id → 在指定对话下**自动新开一条线程**（一个对话可以发多封）
+    #   3) 给 external_id    → 先幂等 ensure 对话，再自动新开线程（定时任务最省事）
     task: dict | None = None
     reply_url: str | None = None
+    resolved_task_id: str | None = payload.task_id
+    conversation_id: str | None = payload.conversation_id
+    conversation_created: bool | None = None
+
     if payload.task_id:
         task = storage.get_task(payload.task_id, user_id=principal.user_id, scoped=True)
         if not task:
@@ -122,6 +130,51 @@ async def send_mail(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=fail("task_closed", "该任务已关闭，无法发送带回复链接的邮件"),
             )
+        conversation_id = task.get("conversation_id")
+    elif payload.conversation_id or payload.external_id:
+        if payload.external_id:
+            convo, conversation_created = storage.ensure_conversation(
+                external_id=payload.external_id.strip(),
+                title=payload.thread_title,
+                api_key_name=principal.name,
+                user_id=principal.user_id,
+            )
+            conversation_id = convo["id"]
+        elif not storage.get_conversation(
+            payload.conversation_id, principal.user_id, scoped=True
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=fail("conversation_not_found", f"找不到对话 {payload.conversation_id}"),
+            )
+
+        if settings.reply_token_ttl_days:
+            from datetime import timedelta, timezone
+
+            expires_at = (
+                datetime.now(timezone.utc) + timedelta(days=settings.reply_token_ttl_days)
+            ).isoformat(timespec="seconds")
+        else:  # pragma: no cover - TTL 配置为 0 时不设过期
+            expires_at = None
+
+        resolved_task_id = storage.create_task(
+            title=payload.thread_title or subject,
+            agent_name=principal.name,
+            api_key_name=principal.name,
+            meta={"auto_created_by": "mail/send", "subject": subject},
+            reply_expires_at=expires_at,
+            user_id=principal.user_id,
+            conversation_id=conversation_id,
+        )
+        storage.add_task_message(
+            task_id=resolved_task_id,
+            role="system",
+            content=f"邮件发出后自动开线程：{subject}",
+            author="system",
+            source="system",
+        )
+        task = storage.get_task(resolved_task_id)
+
     # 会话线程里保存「原始正文」，避免把链接区块也写进对话历史
     thread_content = text_body or html_body or ""
     if task and payload.attach_reply_link:
@@ -167,7 +220,7 @@ async def send_mail(
             body_preview=_preview(text_body or html_body),
             idempotency_key=payload.idempotency_key,
             template=payload.template,
-            task_id=payload.task_id,
+            task_id=resolved_task_id,
             reply_url=reply_url,
             **extra,
         )
@@ -243,7 +296,9 @@ async def send_mail(
             "refused": result.refused,
             "attempts": result.attempts,
             "created_at": storage.now_iso(),
-            "task_id": payload.task_id,
+            "task_id": resolved_task_id,
+            "conversation_id": conversation_id,
+            "conversation_created": conversation_created,
             "reply_url": reply_url,
             "rate_limit": {"used": used, "remaining": remaining, "limit": settings.rate_limit_per_hour},
         },

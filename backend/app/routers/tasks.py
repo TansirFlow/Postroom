@@ -1,17 +1,17 @@
 """
-任务会话（agent 启动任务 → 拿 task_id → 发信带回复链接 → 用户网页回信 → agent 轮询取回）。
+任务会话（agent 启动任务 → 拿 task_id → 发信带回复链接 → 用户网页回信 → agent 取回）。
 
 设计要点：
-- 一个任务 = 一条会话线程（task_messages），agent 与用户交替发言；
+- 一条「任务」= 一条会话线程（task_messages），agent 与用户交替发言；
+- 任务可以挂在一条**对话**（conversation）下：对话 = Agent 侧的一个会话，
+  其下可有多条任务线程（多封带回复链接的邮件），靠 ``conversation_id`` 归组；
 - 任务归属于创建它的账号，控制台/Agent 侧一律按 ``user_id`` 过滤，
   别人的任务 ID 一律当作「不存在」（不泄露存在性）；
 - 回复链接是 HMAC 签名令牌，用户点开即用，无需账号；
-- agent 可用长轮询（wait_seconds）等用户回复，避免高频空转。
+- **取回复不走长轮询**：Agent 用 ``GET /api/v1/inbox`` 增量拉取全部对话的新回复后分发，
+  因此任务不需要「等」用户，用户可以过很久再回复或调整方向。
 """
 from __future__ import annotations
-
-import asyncio
-import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
@@ -29,6 +29,8 @@ def _task_public(task: dict) -> dict:
     """去掉内部字段，补上派生信息。"""
     return {
         "id": task["id"],
+        "task_id": task["id"],
+        "conversation_id": task.get("conversation_id"),
         "title": task["title"],
         "agent_name": task["agent_name"],
         "status": task["status"],
@@ -57,7 +59,7 @@ def _load_task_or_404(task_id: str, principal: Principal) -> dict:
     return task
 
 
-@router.post("", status_code=status.HTTP_201_CREATED, summary="创建任务（Agent 启动时调用，拿到 task_id）")
+@router.post("", status_code=status.HTTP_201_CREATED, summary="创建任务线程（Agent 启动时调用，拿到 task_id）")
 async def create_task(
     payload: TaskCreateRequest,
     request: Request,
@@ -71,6 +73,26 @@ async def create_task(
     expires_at = (datetime.now(timezone.utc) + timedelta(days=ttl)).isoformat(timespec="seconds")
     agent_name = payload.agent_name or principal.name
 
+    # ---- 归属对话：给 external_id 就幂等 ensure，给 conversation_id 就校验存在 ----
+    conversation_id = payload.conversation_id
+    conversation_created: bool | None = None
+    if payload.external_id:
+        convo, conversation_created = storage.ensure_conversation(
+            external_id=payload.external_id.strip(),
+            title=payload.title,
+            agent_name=agent_name,
+            api_key_name=principal.name,
+            user_id=principal.user_id,
+        )
+        conversation_id = convo["id"]
+    elif conversation_id and not storage.get_conversation(
+        conversation_id, principal.user_id, scoped=True
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=fail("conversation_not_found", f"找不到对话 {conversation_id}"),
+        )
+
     task_id = storage.create_task(
         title=payload.title,
         agent_name=agent_name,
@@ -78,6 +100,7 @@ async def create_task(
         meta=payload.meta,
         reply_expires_at=expires_at,
         user_id=principal.user_id,
+        conversation_id=conversation_id,
     )
     storage.add_task_message(
         task_id=task_id,
@@ -101,6 +124,8 @@ async def create_task(
             "task_id": task_id,
             # 与 GET /tasks 的 items[].id 保持一致，避免 Agent 侧字段名踩坑
             "id": task_id,
+            "conversation_id": conversation_id,
+            "conversation_created": conversation_created,
             "status": "open",
             "title": payload.title,
             "agent_name": agent_name,
@@ -108,24 +133,30 @@ async def create_task(
             **link,
             "usage": (
                 "把 task_id 传给 POST /api/v1/mail/send，邮件正文会自动带上回复链接；"
-                "之后用 GET /api/v1/tasks/{task_id}/messages 取用户回复。"
+                "之后用 GET /api/v1/inbox 增量拉取用户回复（无需长轮询等待）。"
             ),
         },
     )
 
 
-@router.get("", summary="任务列表")
+@router.get("", summary="任务列表（可按对话过滤）")
 async def list_tasks(
     request: Request,
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
     status_filter: str | None = Query(None, alias="status"),
     q: str | None = Query(None, description="按标题 / 任务 ID / Agent 名搜索"),
+    conversation_id: str | None = Query(None, description="只看某个对话下的任务线程"),
     principal: Principal = Depends(current_principal),
 ):
     principal.require("tasks:read")
     data = storage.list_tasks(
-        page=page, page_size=page_size, status=status_filter, q=q, user_id=principal.user_id
+        page=page,
+        page_size=page_size,
+        status=status_filter,
+        q=q,
+        user_id=principal.user_id,
+        conversation_id=conversation_id,
     )
     data["items"] = [_task_public(t) for t in data["items"]]
     data["stats"] = storage.task_stats(user_id=principal.user_id)
@@ -165,12 +196,20 @@ async def patch_task(
 ):
     principal.require("tasks:write")
     _load_task_or_404(task_id, principal)
+    if payload.conversation_id and not storage.get_conversation(
+        payload.conversation_id, principal.user_id, scoped=True
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=fail("conversation_not_found", f"找不到对话 {payload.conversation_id}"),
+        )
     updated = storage.update_task(
         task_id,
         title=payload.title,
         agent_name=payload.agent_name,
         status=payload.status,
         meta=payload.meta,
+        conversation_id=payload.conversation_id,
     )
     return ok(
         request, {"task": _task_public(_load_task_or_404(task_id, principal)), "updated": updated}
@@ -314,26 +353,22 @@ async def post_message(
     return ok(request, result)
 
 
-@router.get("/{task_id}/messages", summary="取会话消息（支持长轮询等用户回复）")
+@router.get("/{task_id}/messages", summary="读取会话消息（增量用 after_id；跨对话拉取请用 /inbox）")
 async def get_messages(
     task_id: str,
     request: Request,
     after_id: str | None = Query(None, description="只取此消息之后的新消息"),
     role: str | None = Query(None, description="只看某一方：user / agent / system"),
     limit: int = Query(200, ge=1, le=500),
-    wait_seconds: int = Query(0, ge=0, le=60, description="长轮询：最多阻塞这么多秒等新消息"),
     mark_read: bool = Query(True, description="取回后把未读计数清零"),
     include_link: bool = Query(False, description="是否附带一个新的回复链接"),
     principal: Principal = Depends(current_principal),
 ):
+    """单线程读取。**不做长轮询**：Agent 侧统一走 GET /api/v1/inbox 增量拉取。"""
     principal.require("tasks:read")
     task = _load_task_or_404(task_id, principal)
 
-    deadline = time.monotonic() + wait_seconds
     messages = storage.list_task_messages(task_id, after_id=after_id, limit=limit, role=role)
-    while not messages and wait_seconds > 0 and time.monotonic() < deadline:
-        await asyncio.sleep(1.5)
-        messages = storage.list_task_messages(task_id, after_id=after_id, limit=limit, role=role)
 
     if mark_read and any(m["role"] == "user" for m in messages):
         storage.mark_task_read(task_id)
@@ -345,7 +380,8 @@ async def get_messages(
         # 兼容别名：与 GET /api/v1/tasks 的 items 保持一致
         "items": messages,
         "count": len(messages),
-        "waited": wait_seconds if messages else 0,
+        "last_message_id": messages[-1]["id"] if messages else after_id,
+        "next_cursor": messages[-1].get("seq") if messages else None,
         "task": _task_public(task),
     }
     if include_link and task["status"] == "open":

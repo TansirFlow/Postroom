@@ -33,7 +33,7 @@ const steps = [
     badge: '核心',
     badgeClass: 'badge-ok',
     text: '复制右侧「接入提示词」，连同密钥一起发给你的 Agent / LLM。它会先 GET /api/v1/agent/tools 拿到工具清单，再按清单里的 method + endpoint + parameters 组装请求，不需要你手写接口。',
-    hint: '工具清单是 OpenAI function-calling 格式，可以直接当作模型的 tools 参数使用。完整接口列表见「接口文档」。',
+    hint: '工具清单是 OpenAI function-calling 格式，可以直接当作模型的 tools 参数使用。回复是「拉取式」的：Agent 用 GET /api/v1/inbox 增量取，不用等、不用长轮询。完整接口列表见「接口文档」。',
     to: '/docs',
     linkText: '去接口文档',
   },
@@ -43,7 +43,7 @@ const steps = [
 const pages = [
   { name: '概览', path: '/', desc: '今日与累计发信量、成功率、SMTP 配置状态、进行中任务数' },
   { name: '发信工作台', path: '/compose', desc: '手动发一封邮件；勾选「创建任务会话」后，正文会自动带「点开即回复」按钮' },
-  { name: '任务会话', path: '/tasks', desc: 'Agent ↔ 收件人的往返对话；可查看 / 轮换回复链接、关闭或删除任务' },
+  { name: '任务会话', path: '/tasks', desc: 'Agent ↔ 收件人的往返线程；详情里能看到所属对话，可查看 / 轮换回复链接、关闭或删除任务' },
   { name: '发送记录', path: '/logs', desc: '每封信的状态、耗时与失败原因（含 SMTP 原始错误）' },
   { name: '接口文档 / Agent 工具', path: '/docs', desc: 'Agent 工具清单 + cURL / Python / Node 示例 + 完整错误码' },
   { name: 'API 密钥', path: '/keys', desc: '给 Agent 用的密钥；可启用、停用、删除' },
@@ -56,16 +56,21 @@ const pages = [
   },
 ]
 
-// ---------------------------------------------------------------- 任务闭环
+// ---------------------------------------------------------------- 对话 + 拉取闭环
 const flow = [
-  { t: 'Agent 建任务', c: 'POST /api/v1/tasks', d: '拿到 task_id 与 reply_url' },
-  { t: 'Agent 发邮件', c: 'POST /api/v1/mail/send', d: '带上 "task_id"，正文自动追加「点开即回复」按钮' },
-  { t: '收件人回帖', c: '打开邮件里的链接', d: '免登录网页对话，链接本身即凭证' },
-  { t: 'Agent 取回', c: 'GET /api/v1/tasks/{id}/messages', d: 'wait_seconds 长轮询，最长阻塞 60 秒，不用空转' },
+  { t: 'Agent 开对话', c: 'POST /api/v1/conversations', d: '带上 Agent 侧的对话标识（external_id），同一个标识重复调用只会复用，不会重复建' },
+  { t: 'Agent 发邮件', c: 'POST /api/v1/mail/send', d: '带 "conversation_id"（或 external_id）：自动开一条线程，正文追加「点开即回复」按钮' },
+  { t: 'Agent 不等', c: '—', d: '任务不会被自动关闭，回复链接默认 30 天有效；Agent 可以继续干别的对话' },
+  { t: '收件人回帖', c: '打开邮件里的链接', d: '免登录网页对话，链接本身即凭证；隔几天再回也行' },
+  { t: '定时任务拉取', c: 'GET /api/v1/inbox', d: 'cron 每 30 秒一次取走全部对话的增量回复，按 conversation_id 分发回各自对话' },
+  { t: '确认水位', c: 'POST /api/v1/inbox/ack', d: '分发成功后推进水位；下次不带 cursor 就从新水位继续，不会重复投递' },
 ]
 
 const flowNotes = [
-  '链接可轮换：POST /tasks/{id}/reply-link 让旧链接立即失效；任务关闭后不能再回帖（仍可只读查看）。',
+  '「拉取」而不是「等待」：服务端没有长轮询接口。Agent 用 /inbox 增量拉取，因此一个进程能同时服务多个对话，用户过多久回复都不会丢。',
+  '游标是全局单调递增的 seq，藏在每条消息的 seq 字段里。不传 cursor 时用服务端水位（按 API 密钥记录），进程重启也不会重复投递。',
+  '先分发、后 ack：中途崩了最多重复投递一次，不会漏。水位只增不减，传旧值不会回退。',
+  '链接可轮换：POST /tasks/{id}/reply-link 让旧链接立即失效；关闭对话或任务后不能再回帖（仍可只读查看）。',
   '「对外地址」（系统设置）决定邮件里链接的域名。填成本机地址，收件人就点不开了。',
   '同一任务回帖限流 60 条/小时；单条消息长度上限由服务端 MESSAGE_MAX_CHARS 控制。',
 ]
@@ -74,8 +79,8 @@ const flowNotes = [
 const scopes = [
   { s: 'mail:send', d: '发信、测试 SMTP、查看内置模板' },
   { s: 'mail:read', d: '查看发信记录、发信统计、控制台概览' },
-  { s: 'tasks:write', d: '建 / 改 / 关闭 / 删除任务、发消息、轮换回复链接' },
-  { s: 'tasks:read', d: '查看任务列表与会话内容' },
+  { s: 'tasks:write', d: '建 / 改 / 关闭 / 删除任务与对话、发消息、轮换回复链接、ack 拉取水位' },
+  { s: 'tasks:read', d: '查看任务与对话、拉取收件箱（/inbox）' },
   { s: 'keys:manage', d: '管理本账号的 API 密钥' },
   { s: 'users:manage', d: '仅管理员：管理账号（普通账号无法申请该权限）' },
 ]
@@ -93,6 +98,7 @@ const errors = [
   { c: 'token_expired', s: '回复链接已过期', f: '让 Agent 重新发一封带新链接的邮件' },
   { c: 'token_revoked', s: '链接已被轮换吊销', f: '用最新那封邮件里的链接' },
   { c: 'task_closed', s: '任务已关闭', f: 'Agent 调 /tasks/{id}/reopen 重新打开' },
+  { c: 'conversation_not_found', s: '对话不存在，或不属于当前账号', f: '先用 POST /conversations 幂等 ensure 一次再引用；跨账号的对话一律 404' },
 ]
 
 // ---------------------------------------------------------------- 验收清单
@@ -101,6 +107,8 @@ const checks = [
   '发信工作台给自己发一封，发送记录里状态为成功',
   '再发一封并勾选「创建任务会话」，邮件正文里有「点开即回复」按钮',
   '点邮件里的按钮能打开对话页，回一句话后「任务会话」页能看到它',
+  '用 Agent 密钥调一次 GET /api/v1/inbox，能在 items 里看到刚才那句回复（说明定时拉取通了）',
+  '调 POST /api/v1/inbox/ack 传回 next_cursor，再拉一次 items 为空且 watermark 不变',
   '「概览」页的今日发信量、成功率随之变化',
 ]
 
@@ -118,20 +126,35 @@ const prompt = computed(() => `你是通过 Postroom 发邮件的助手。请遵
   POST /api/v1/mail/send
   {"to": ["someone@example.com"], "subject": "标题", "body": "正文"}
 
-【需要对方回复时（任务闭环）】
-  1. POST /api/v1/tasks
-     {"title": "本次任务名称", "agent_name": "你的名字"}
-     → 记下返回的 task_id
-  2. POST /api/v1/mail/send
-     带上 {"task_id": "<上一步的 id>", ...}
+【需要对方回复时（对话 + 定时拉取）】
+  A. 每进一个新对话，先幂等拿一个会话 id（同一个 external_id 只会复用，不会重复建）：
+     POST /api/v1/conversations
+     {"external_id": "codex:<你的会话 id>", "title": "本次任务名称", "agent_name": "你的名字"}
+     → 记下返回的 conversation_id
+
+  B. 发信：带上会话 id（也可以只给 external_id，服务端会自动 ensure）
+     POST /api/v1/mail/send
+     {"conversation_id": "<上一步的 id>", "thread_title": "标题", "to": [...], "subject": "...", "body": "..."}
      → 邮件正文会自动追加「点开即回复」按钮，不用自己拼链接
-  3. GET  /api/v1/tasks/<id>/messages?role=user&wait_seconds=55
-     → 长轮询等用户回复，最长阻塞 60 秒；没有新消息就再来一次
-  4. POST /api/v1/tasks/<id>/messages
+
+  C. 发完就走，不要等。任务不会被自动关闭，回复链接默认 30 天有效。
+
+  D. 由定时任务（cron，建议每 30 秒）统一取回复，一次拿到全部对话的增量：
+     GET /api/v1/inbox            ← 不传 cursor 就用服务端水位，进程重启也不会重复投递
+     → 返回 items[]，每条带 conversation_id / external_id / task_id / content / seq
+     → 按 conversation_id 把消息送回对应的对话即可
+
+  E. 分发成功后确认水位（只增不减，重复提交安全）：
+     POST /api/v1/inbox/ack
+     {"upto_seq": <上一步返回的 next_cursor>}
+
+  F. 需要主动加一句 / 通知对方：
+     POST /api/v1/tasks/<task_id>/messages
      {"content": "要回复的话", "notify_email": ["someone@example.com"]}
-     → notify_email 可选：回帖的同时给对方发一封邮件通知
-  5. POST /api/v1/tasks/<id>/close
-     → 收尾；关闭后回复链接立即失效
+
+  G. 收尾：关闭对话或单条任务，回复链接立即失效
+     POST /api/v1/conversations/<conversation_id>/close
+     POST /api/v1/tasks/<task_id>/close
 
 【响应契约】
   所有接口都返回 {"ok": bool, "data": ..., "error": {"code", "message"}, "request_id": "..."}
@@ -164,13 +187,15 @@ async function copy(text, tag) {
       <div>
         <div class="tut-hero-title">使用教程</div>
         <div class="tut-hero-sub">
-          按顺序走一遍大约 5 分钟：配好发信通道 → 建一把 Agent 密钥 → 把接口交给 Agent。
+          按顺序走一遍大约 5 分钟：配好发信通道 → 建一把 Agent 密钥 → 把接口交给 Agent →
+          用定时任务从 /inbox 拉回复。用户什么时候回都行，Agent 不用等。
         </div>
         <div class="tut-hero-chips">
           <span class="chip">1 · 配 SMTP</span>
           <span class="chip">2 · 建密钥</span>
           <span class="chip">3 · 接入 Agent</span>
-          <span class="chip">4 · 跑通任务闭环</span>
+          <span class="chip">4 · 每个对话独立发信</span>
+          <span class="chip">5 · cron 拉取回复</span>
         </div>
       </div>
       <div class="tut-hero-actions">
@@ -232,11 +257,11 @@ async function copy(text, tag) {
           </table>
         </div>
 
-        <!-- 任务闭环 -->
+        <!-- 对话 + 拉取闭环 -->
         <div class="card">
           <div class="card-head">
-            <div class="card-title">任务闭环：让 Agent 能「等用户回话」</div>
-            <div class="card-desc">本项目的主要用法，普通「发完即走」的邮件也支持</div>
+            <div class="card-title">回复闭环：定时任务拉取，Agent 不用等</div>
+            <div class="card-desc">每个对话独立发信，回复由 cron 从 /inbox 取走后分发回对应对话</div>
           </div>
           <div class="card-body">
             <div class="steps">

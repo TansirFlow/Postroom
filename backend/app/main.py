@@ -25,7 +25,19 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from . import passwords, storage
 from .config import FRONTEND_DIST, settings
 from .responses import fail
-from .routers import agent, auth, keys, mail, reply, settings as settings_router, system, tasks, users
+from .routers import (
+    agent,
+    auth,
+    conversations,
+    inbox,
+    keys,
+    mail,
+    reply,
+    settings as settings_router,
+    system,
+    tasks,
+    users,
+)
 from .security import ALL_SCOPES, generate_key, hash_key
 
 logging.basicConfig(
@@ -138,7 +150,9 @@ app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(settings_router.router)
 app.include_router(mail.router)
+app.include_router(conversations.router)
 app.include_router(tasks.router)
+app.include_router(inbox.router)
 app.include_router(reply.router)
 app.include_router(keys.router)
 app.include_router(agent.router)

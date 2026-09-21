@@ -1,10 +1,14 @@
-"""任务会话 + 邮件内免登录回复链接 + 多用户隔离 端到端回归测试。
+"""任务会话 + 邮件内免登录回复链接 + 对话/收件箱 + 多用户隔离 端到端回归测试。
 
 覆盖：
-  A. 建任务 → Agent 发消息 → 邮件带链接 → 用户网页回帖 → Agent 轮询取回
+  A. 建任务 → Agent 发消息 → 邮件带链接 → 用户网页回帖 → Agent 增量取回
      → 令牌轮换/篡改/关闭/删除等安全路径；
-  B. 多用户：账号密码登录、按用户数据隔离、每用户 SMTP 设置、
-     仅管理员可建账号、重置密码踢下线、删除账号级联清理。
+  A2. 拉取式回复：对话幂等 ensure、同一对话多线程、/inbox 增量拉取与按会话分组、
+     ack 水位只增不减、至少一次语义（不重复投递）、显式 cursor 重放；
+  B. 多用户：账号密码登录、按用户数据隔离（含对话与收件箱水位按密钥隔离）、
+     每用户 SMTP 设置、仅管理员可建账号、重置密码踢下线、删除账号级联清理。
+
+注意：**不含长轮询**——回复一律通过 GET /api/v1/inbox 拉取。
 
 前置：后端已在 http://127.0.0.1:8077 运行。密钥与口令**通过环境变量传入**，
 仓库里不含任何默认凭据。
@@ -165,12 +169,15 @@ check("POST reply 201", st == 201, f"status={st}")
 check("返回 message.role=user", (d.get("message") or {}).get("role") == "user")
 check("返回 agent_hint 取回方式", "after_id=" in str(d.get("agent_hint")), str(d.get("agent_hint"))[:70])
 
-# ---------- 7) Agent 轮询取回 ----------
+# ---------- 7) Agent 增量拉取（已无长轮询） ----------
 print("\n7) Agent 增量拉取用户回复")
-st, r = call("GET", f"/api/v1/tasks/{tid}/messages?role=user&wait_seconds=0")
+st, r = call("GET", f"/api/v1/tasks/{tid}/messages?role=user")
 d = r.get("data") or {}
 check("messages 与 items 双键一致", d.get("messages") == d.get("items"))
 check("拉到 1 条用户消息", len(d.get("messages") or []) == 1, f"count={len(d.get('messages') or [])}")
+check("消息带游标 seq", all(isinstance(m.get("seq"), int) for m in (d.get("messages") or [])),
+      str([m.get("seq") for m in (d.get("messages") or [])]))
+check("返回 next_cursor", isinstance(d.get("next_cursor"), int), str(d.get("next_cursor")))
 check("waiting_reply 已清零", (d.get("task") or {}).get("waiting_reply") is False)
 
 # ---------- 8) 安全路径 ----------
@@ -197,6 +204,143 @@ st, r = call("GET", f"/api/v1/reply/{new_tok}", auth=False)
 check("删除后链接 404 失效", st == 404, f"status={st}")
 st, r = call("GET", f"/api/v1/tasks/{tid}")
 check("删除后任务 404", st == 404, f"status={st}")
+
+
+# ==================================================================
+# A2. 对话 + 收件箱：Agent 不等回复，定时任务拉取后按对话分发
+# ==================================================================
+print("\n11) 对话幂等 ensure（定时任务重启不用记住 id）")
+ext_id = f"regression:conv:{rand(8)}"
+st, r = call("POST", "/api/v1/conversations", {
+    "external_id": ext_id, "title": "回归 · 拉取式对话", "agent_name": "regression-bot"})
+d = r.get("data") or {}
+cid = d.get("conversation_id") or ""
+check("POST /conversations 200", st == 200, f"status={st}")
+check("首次 ensure created=true", d.get("created") is True)
+check("返回 conversation_id", bool(cid), cid)
+
+st, r = call("POST", "/api/v1/conversations", {"external_id": ext_id})
+d2 = r.get("data") or {}
+check("同一 external_id 重复 ensure created=false", st == 200 and d2.get("created") is False, f"status={st}")
+check("重复 ensure 复用同一条会话", d2.get("conversation_id") == cid, str(d2.get("conversation_id")))
+check("幂等 ensure 不会新增会话", (call("GET", f"/api/v1/conversations?q={ext_id}")[1].get("data") or {}).get("total") == 1)
+
+st, r = call("GET", f"/api/v1/conversations/{cid}")
+convo = (r.get("data") or {}).get("conversation") or {}
+check("会话详情 200", st == 200, f"status={st}")
+check("external_id 原样带回", convo.get("external_id") == ext_id, str(convo.get("external_id")))
+
+print("\n12) 同一对话下发两封邮件（各开一条任务线程）")
+thread_tokens, thread_tasks = [], []
+for i, title in enumerate(["第一封 · 环境对齐", "第二封 · 延迟排查"], start=1):
+    st, r = call("POST", "/api/v1/tasks", {"title": title, "external_id": ext_id})
+    dd = r.get("data") or {}
+    check(f"第 {i} 封建线程 201 且自动挂到对话",
+          st == 201 and dd.get("conversation_id") == cid, f"status={st}")
+    check(f"第 {i} 封 ensure 复用已有对话（不再新建）", dd.get("conversation_created") is False,
+          str(dd.get("conversation_created")))
+    thread_tokens.append(((dd.get("reply_url") or "").rsplit("/", 1)[-1]))
+    thread_tasks.append(dd.get("task_id") or "")
+st, r = call("POST", "/api/v1/tasks", {"title": "第三封 · 挂到指定对话", "conversation_id": cid})
+t_c = (r.get("data") or {}).get("task_id") or ""
+check("显式 conversation_id 也能挂上", st == 201 and bool(t_c), f"status={st}")
+st, r = call("GET", f"/api/v1/conversations/{cid}")
+check("会话下挂着 3 条任务线程",
+      ((r.get("data") or {}).get("conversation") or {}).get("task_count") == 3,
+      str(((r.get("data") or {}).get("conversation") or {}).get("task_count")))
+st, r = call("GET", f"/api/v1/tasks?conversation_id={cid}")
+check("按对话过滤任务列表", (r.get("data") or {}).get("total") == 3, f"total={(r.get('data') or {}).get('total')}")
+
+print("\n13) 建立拉取基线（先取一次再 ack 水位）")
+st, r = call("GET", "/api/v1/inbox")
+d = r.get("data") or {}
+base = d.get("next_cursor") or 0
+check("GET /inbox 200（非阻塞，立即返回）", st == 200, f"status={st}")
+check("返回 by_conversation 分组字段", isinstance(d.get("by_conversation"), list), str(type(d.get("by_conversation"))))
+check("返回 watermark 字段", "watermark" in d, str(d.get("watermark")))
+st, r = call("POST", "/api/v1/inbox/ack", {"upto_seq": base})
+check("ack 推进水位", st == 200 and (r.get("data") or {}).get("watermark") == base, f"status={st}")
+
+print("\n14) 用户回帖 → 定时任务一次拉走全部对话的回复")
+st, r = call("POST", f"/api/v1/reply/{thread_tokens[0]}",
+             {"content": "第一个方向先别动，帮我确认仿真步长", "author": "回归用户"}, auth=False)
+check("用户回帖 201", st == 201, f"status={st}")
+check("agent_hint 指向 /inbox 拉取（不再提长轮询）",
+      "/api/v1/inbox" in str((r.get("data") or {}).get("agent_hint")), str((r.get("data") or {}).get("agent_hint"))[:70])
+st, r = call("POST", f"/api/v1/reply/{thread_tokens[1]}", {"content": "第二个方向换成 GPU 训练试试"}, auth=False)
+check("第二封线程也回帖 201", st == 201, f"status={st}")
+
+st, r = call("GET", "/api/v1/inbox")
+d = r.get("data") or {}
+items = d.get("items") or []
+check("一次拉到两条回复（无须逐任务轮询）", len(items) == 2, f"count={d.get('count')}")
+check("每条都带 conversation_id（可直接路由）", all(i.get("conversation_id") == cid for i in items))
+check("两条分属不同任务线程", len({i.get("task_id") for i in items}) == 2, str(sorted({i.get("task_id") for i in items})))
+check("按 seq 升序返回", [i["seq"] for i in items] == sorted(i["seq"] for i in items), str([i["seq"] for i in items]))
+check("消息自带游标 seq", all(isinstance(i.get("seq"), int) and i["seq"] > base for i in items))
+bc = d.get("by_conversation") or []
+check("按会话归组：1 个会话 / 2 条消息", len(bc) == 1 and bc[0].get("count") == 2, str(bc))
+check("分组里含 2 条任务线程", len(bc[0].get("task_ids") or []) == 2, str(bc[0].get("task_ids") if bc else None))
+check("next_cursor 已前进", (d.get("next_cursor") or 0) > base, f"{base} -> {d.get('next_cursor')}")
+
+print("\n15) ack 之后不重复投递（至少一次语义）")
+new_cursor = d.get("next_cursor") or 0
+st, r = call("POST", "/api/v1/inbox/ack", {"upto_seq": new_cursor})
+ad = r.get("data") or {}
+check("ack 200", st == 200, f"status={st}")
+check("水位 = next_cursor", ad.get("watermark") == new_cursor, str(ad.get("watermark")))
+check("清掉 2 个线程的待回复计数", ad.get("tasks_marked_read") == 2, str(ad.get("tasks_marked_read")))
+st, r = call("GET", "/api/v1/inbox")
+check("不带 cursor 再拉为空（不重复投递）", not ((r.get("data") or {}).get("items")), str((r.get("data") or {}).get("items")))
+st, r = call("POST", "/api/v1/inbox/ack", {"upto_seq": 0})
+check("水位只增不减（传旧值不回退）", (r.get("data") or {}).get("watermark") == new_cursor, str((r.get("data") or {}).get("watermark")))
+WM_FINAL = new_cursor
+
+print("\n16) 显式 cursor 可重放 + 概览统计")
+st, r = call("GET", f"/api/v1/inbox?cursor={base}")
+check("显式 cursor 能重放那两条", st == 200 and len((r.get("data") or {}).get("items") or []) == 2, f"status={st}")
+st, r = call("GET", f"/api/v1/inbox?cursor={new_cursor}&role=all")
+check("role=all 可看全部角色消息", st == 200 and len((r.get("data") or {}).get("items") or []) >= 0, f"status={st}")
+st, r = call("GET", "/api/v1/inbox/stats")
+sd = r.get("data") or {}
+check("inbox/stats 200 且含水位与待取条数",
+      st == 200 and "watermark" in sd and "pending_messages" in sd, f"status={st}")
+check("stats 显示待取为 0", sd.get("pending_messages") == 0, str(sd.get("pending_messages")))
+check("stats 显示会话未读已清", (sd.get("conversations") or {}).get("unread") == 0, str(sd.get("conversations")))
+check("stats 含该对话", (sd.get("conversations") or {}).get("total", 0) >= 1, str(sd.get("conversations")))
+st, r = call("GET", "/api/v1/overview")
+check("控制台概览带 conversation_stats 与 inbox",
+      "conversation_stats" in (r.get("data") or {}) and "inbox" in (r.get("data") or {}), f"status={st}")
+
+print("\n17) 错误路径")
+st, r = call("GET", "/api/v1/conversations/conv_doesnotexist")
+check("不存在的对话 404 conversation_not_found", st == 404 and code_of(r) == "conversation_not_found", f"status={st}")
+st, r = call("POST", "/api/v1/tasks", {"title": "x", "conversation_id": "conv_doesnotexist"})
+check("挂到不存在的对话 404", st == 404 and code_of(r) == "conversation_not_found", f"status={st}")
+st, r = call("GET", "/api/v1/inbox", auth=False)
+check("无凭证拉取收件箱 401", st == 401, f"status={st}")
+st, r = call("POST", "/api/v1/inbox/ack", {"upto_seq": new_cursor}, auth=False)
+check("无凭证 ack 401", st == 401, f"status={st}")
+st, r = call("GET", "/api/v1/inbox?limit=999")
+check("limit 超上限 422", st == 422, f"status={st}")
+
+print("\n18) 自清理：删对话 + 删线程")
+st, r = call("DELETE", f"/api/v1/conversations/{cid}")
+check("DELETE 对话 200", st == 200 and (r.get("data") or {}).get("deleted") is True, f"status={st}")
+st, r = call("GET", f"/api/v1/tasks/{t_c}")
+check("删对话后任务仍在（只解关联）",
+      st == 200 and ((r.get("data") or {}).get("task") or {}).get("conversation_id") is None,
+      str(((r.get("data") or {}).get("task") or {}).get("conversation_id")))
+st, r = call("GET", f"/api/v1/reply/{thread_tokens[0]}", auth=False)
+check("删对话后回复链接仍可用（任务未被连带删除）", st == 200, f"status={st}")
+for leftover in [*thread_tasks, t_c]:
+    call("DELETE", f"/api/v1/tasks/{leftover}")
+st, r = call("GET", f"/api/v1/conversations?q={ext_id}")
+check("测试对话已清理", (r.get("data") or {}).get("total") == 0, f"total={(r.get('data') or {}).get('total')}")
+st, r = call("GET", "/api/v1/tasks?page_size=200")
+left = [t for t in ((r.get("data") or {}).get("items") or []) if (t.get("title") or "").startswith("第")
+        or (t.get("title") or "").startswith("第三封")]
+check("测试线程已清理干净", not left, str([t.get("title") for t in left]))
 
 
 # ==================================================================
@@ -278,6 +422,28 @@ else:
     check("管理员看不到别人的任务（404）", st == 404 and code_of(r) == "task_not_found", f"status={st}")
     st, r = call("GET", f"/api/v1/tasks/{utid}", key=KEY)
     check("原 Agent 密钥看不到别人的任务（404）", st == 404, f"status={st}")
+
+    st, r = call("POST", "/api/v1/conversations", {"external_id": ext_id}, key=user_key)
+    other_cid = (r.get("data") or {}).get("conversation_id") or ""
+    check("同 external_id 在另一账号下是另一条会话（唯一索引按账号隔离）",
+          st == 200 and bool(other_cid) and other_cid != cid, f"status={st} id={other_cid}")
+    st, r = call("GET", "/api/v1/inbox", key=user_key)
+    check("新账号收件箱看不到别人的回复",
+          st == 200 and not ((r.get("data") or {}).get("items")), f"status={st}")
+    st, r = call("GET", f"/api/v1/inbox/stats", key=user_key)
+    check("新账号收件箱水位从 0 开始", (r.get("data") or {}).get("watermark") == 0, f"status={st}")
+    st, r = call("GET", f"/api/v1/tasks?conversation_id={cid}", key=user_key)
+    check("新账号按别人的对话过滤查不到任务",
+          st == 200 and not ((r.get("data") or {}).get("items")), f"status={st}")
+    st, r = call("GET", f"/api/v1/conversations/{cid}", key=user_key)
+    check("新账号读别人的对话 404", st == 404, f"status={st}")
+    st, r = call("POST", "/api/v1/inbox/ack", {"upto_seq": 999999}, key=user_key)
+    check("新账号 ack 只推进自己的水位", st == 200 and (r.get("data") or {}).get("watermark") == 999999, f"status={st}")
+    st, r = call("GET", "/api/v1/inbox")
+    check("原账号水位未被他人推进（水位按密钥隔离）",
+          (r.get("data") or {}).get("watermark") == WM_FINAL,
+          f"{(r.get('data') or {}).get('watermark')} vs {WM_FINAL}")
+    call("DELETE", f"/api/v1/conversations/{other_cid}", key=user_key)
 
     print("\nB4) 每用户独立 SMTP 设置")
     st, r = call("GET", "/api/v1/settings", token=user_token)

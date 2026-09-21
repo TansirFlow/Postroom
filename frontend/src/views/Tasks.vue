@@ -251,6 +251,12 @@ onMounted(loadList)
           </dd>
           <dt>Agent</dt>
           <dd>{{ detail.agent_name || '-' }}</dd>
+          <dt>所属对话</dt>
+          <dd v-if="detail.conversation_id" class="mono small">
+            {{ detail.conversation_id }}
+            <button class="btn btn-sm" style="margin-left: 6px" @click="copy(detail.conversation_id, '对话 ID 已复制')">复制</button>
+          </dd>
+          <dd v-else class="muted small">未归入对话（独立的邮件线程）</dd>
           <dt>创建 / 最后消息</dt>
           <dd class="muted small">{{ fmtTime(detail.created_at) }} → {{ fmtTime(detail.last_message_at) }}</dd>
           <dt>上下文 meta</dt>

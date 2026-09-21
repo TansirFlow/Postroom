@@ -9,7 +9,7 @@
 三个能力模块：
 
 1. **邮件发送**（任意 SMTP 服务商，可全局共用也可每账号独立）——Agent 直接调接口发信；
-2. **任务会话 + 免登录回复链接**——Agent 启动任务时拿一个 `task_id`，之后每封邮件正文都会自动附带一个「点开即回复」的网页链接，**收件人不用登录、不用装 App**，点开就能在浏览器里和 Agent 多轮对话；Agent 用长轮询把回复取回去，形成闭环；
+2. **对话 + 任务线程 + 免登录回复链接**——Agent 侧**每个对话**都能独立发信：先按对话标识幂等拿一个 `conversation_id`，之后每封邮件的正文都会自动附带一个「点开即回复」的网页链接，**收件人不用登录、不用装 App**，点开就能在浏览器里和 Agent 多轮对话；回复由**定时任务**从 `GET /api/v1/inbox` 一次拉走后按对话分发，所以 **Agent 不用等用户**，用户隔几天再回复或中途改方向都行；
 3. **多用户管理**——管理员在网页里建账号、重置密码、启停；每个账号在「系统设置」里填自己的 SMTP 与对外域名。
 
 Agent 拉一次 `GET /api/v1/agent/tools` 就能拿到 OpenAI function-calling 格式的 8 个工具定义，直接注册进自己的工具列表即可，无需人工写 prompt。
@@ -35,7 +35,9 @@ postroom/
 │  │     ├─ users.py            # 用户管理（仅管理员）
 │  │     ├─ settings.py         # 每账号设置（SMTP / 对外地址 / 测试收件人）
 │  │     ├─ mail.py             # 邮件接口（agent 主入口）
-│  │     ├─ tasks.py            # 任务会话（建任务/发消息/长轮询取用户回复/吊销链接）
+│  │     ├─ conversations.py    # 对话（按 external_id 幂等 ensure，一个对话可挂多条线程）
+│  │     ├─ tasks.py            # 任务线程（建线程/发消息/吊销链接）
+│  │     ├─ inbox.py            # 收件箱（定时任务增量拉取 + ack 水位）
 │  │     ├─ reply.py            # 免登录回复页后端（链接即凭证，无需登录）
 │  │     ├─ keys.py             # 密钥管理
 │  │     ├─ system.py           # 健康检查 / 公开站点信息 / 概览
@@ -46,7 +48,7 @@ postroom/
 ├─ frontend/                    # Vue 3 + Vite 控制台
 │  └─ src/{App.vue,components/*,views/*,api.js,router.js,styles.css}
 ├─ tests/
-│  └─ test_task_flow.py         # 任务会话 + 回复链接 + 多用户隔离端到端回归（自清理，88 项断言）
+│  └─ test_task_flow.py         # 对话/收件箱 + 回复链接 + 多用户隔离端到端回归（自清理，149 项断言）
 ├─ screenshots/                 # 登录页 / 使用教程 / 控制台 / 设置 / 用户管理 / 回复页截图
 ├─ LICENSE                      # MIT
 ├─ run-backend.cmd              # Windows 一键启动后端
@@ -179,8 +181,8 @@ npm run build
 | --- | --- |
 | `mail:send` | 发信、查模板、测试 SMTP 连接 |
 | `mail:read` | 查发送记录、统计 |
-| `tasks:write` | 建任务、向任务线程发消息、吊销/轮换回复链接、关闭任务 |
-| `tasks:read` | 查任务列表/详情、长轮询取用户回复 |
+| `tasks:write` | 建任务/对话、向线程发消息、吊销/轮换回复链接、关闭任务、`POST /inbox/ack` 推进水位 |
+| `tasks:read` | 查对话与任务列表/详情、`GET /inbox` 拉取用户回复 |
 | `keys:manage` | 增删改**本账号**的 API 密钥 |
 | `users:manage` | 管理用户账号（**仅管理员**，且不能给自己发放之外的账号分配） |
 
@@ -194,6 +196,8 @@ npm run build
 | API 密钥 | `api_keys.user_id`，列表/启停/删除都只看自己账号的 |
 | 发信记录 | `mail_logs.user_id`，列表、详情、统计、幂等键全部按账号 |
 | 任务会话 | `tasks.user_id`，别人的 `task_id` 一律返回 `404 task_not_found`（不泄露存在性） |
+| 对话 | `conversations.user_id`；`external_id` 的唯一索引也是**按账号**的，所以两个账号可以用同一个 `external_id` 各建各的对话，别人的 `conversation_id` 一律 `404 conversation_not_found` |
+| 收件箱拉取进度 | `inbox_watermarks.owner`（= API 密钥名）+ `user_id`，**按密钥隔离**；一把密钥 ack 不会推进另一把的水位 |
 | SMTP / 对外地址 / 测试收件人 | `user_settings` 表，一行一个账号 |
 | 用户账号 | `users` 表，`role` = `admin` / `user` |
 
@@ -244,7 +248,7 @@ curl -X POST http://127.0.0.1:8077/api/v1/mail/send \
     "to": ["you@example.com"],
     "subject": "任务完成通知",
     "body": "2026-Q3 报表已生成，环比 +18.4%",
-    "idempotency_key": "train-200k-done"
+    "idempotency_key": "deploy-report-q3"
   }'
 ```
 
@@ -306,39 +310,59 @@ Swagger：<http://127.0.0.1:8077/api/docs>，OpenAPI：`/openapi.json`。
 
 ---
 
-## 五、任务会话 + 邮件内免登录回复链接
+## 五、对话、任务线程与邮件内免登录回复链接
 
-这是把**邮件变成双向对话通道**的闭环设计：
+这是把**邮件变成双向对话通道**的闭环设计。关键点：**回复是「拉取式」的**——Agent 发完就走，
+由定时任务（cron）从 `/api/v1/inbox` 增量拉走全部对话的回复，再按 `conversation_id` 分发回各自对话。
+所以 Agent 不需要等用户，用户隔几天再回复、或者中途改研究方向都可以。
 
 ```
-Agent 启动任务                用户收到邮件                用户在网页回帖            Agent 继续干活
-      │                            │                          │                        │
- POST /tasks ──► task_id            │                          │                        │
-      │      └► reply_url           │                          │                        │
-      │                            │                          │                        │
- POST /mail/send {task_id} ────────►│ 正文末尾带「点开即回复」   │                        │
-      │                            │ 按钮 ──点击──────────────►│ 打开 /reply/<token>     │
-      │                            │                          │ 看完整线程，输入即发    │
-      │                            │                          │                        │
- GET /tasks/{id}/messages?wait_seconds=60 ◄─────────────────────────────────────────────┘
-      │  长轮询阻塞，用户一回帖立刻返回
-      └► 拿到回复 → 继续执行 → 再 POST /mail/send 汇报 → …… 直到 close
+Agent 侧一个对话                用户收到邮件            用户在网页回帖          cron 拉取并分发
+      │                              │                      │                      │
+ POST /conversations ──► conv_id     │                      │                      │
+   (external_id 幂等)                │                      │                      │
+      │                              │                      │                      │
+ POST /mail/send {conversation_id} ─►│ 正文末尾带「点开即回复」│                      │
+      │  ⇒ 自动开一条 task 线程      │ 按钮 ──点击──────────►│ 打开 /reply/<token>  │
+      │                              │                      │ 看完整线程，输入即发  │
+      │                              │                      │                      │
+   ── 不等，继续干别的 ──            │                      │                      │
+      │                              │                      │                      │
+ GET /inbox ◄───────────────────────────────────────────────────────────────────────┘
+      │  一次拿到全部对话的增量回复（带 conversation_id / task_id / seq）
+      ├─► 按 conversation_id 分发回各对话
+      └─► POST /inbox/ack {upto_seq: next_cursor} → 水位推进，下次不重复投递
 ```
 
-### 1) `POST /api/v1/tasks` — 启动任务，拿 `task_id`
+### 1) `POST /api/v1/conversations` — 幂等拿一个对话
+
+Agent 侧**一个对话**（codex / claude code 等客户端里的一个会话）对应这里一条 conversation，
+其下可以挂多条任务线程（每封带回复链接的邮件 = 一条线程）。
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `title` | string | ✅ | 任务标题（会出现在邮件主题和回复页顶部） |
+| `external_id` | string | | **Agent 侧的对话标识**，同一账号下唯一。重复提交同一个值只会**复用**已有对话（`created=false`），所以定时任务重启后不必自己记住 `conversation_id` |
+| `title` | string | | 对话标题，控制台与回复页会显示 |
 | `agent_name` | string | | 显示名，默认取密钥名 |
-| `meta` | object | | 任意上下文（如 `{"run_id": "...", "ckpt": "..."}`） |
-| `reply_expires_days` | int | | 覆盖默认有效期（天） |
+| `meta` | object | | 任意上下文，原样带回 |
 
-响应同时给出 `task_id`、`reply_url`、`reply_token`、`reply_expires_at`。（`task_id` 与 `id` 两个键值相同，与列表接口的 `items[].id` 对齐。）
+响应给出 `conversation_id`（与 `id` 同值）与 `created`。
 
-### 2) `POST /api/v1/mail/send` 带上 `task_id`
+其余接口：`GET /api/v1/conversations`（列表 + `stats`）、`GET /api/v1/conversations/{id}`（详情 + 旗下任务线程）、
+`PATCH /api/v1/conversations/{id}`、`POST /api/v1/conversations/{id}/close|reopen`、
+`DELETE /api/v1/conversations/{id}`（**只解除任务的关联，不连带删除线程**）。
 
-邮件正文（纯文本和 HTML 两版）末尾都会自动追加：
+### 2) `POST /api/v1/mail/send` — 每封邮件一条线程
+
+发信时可以带三种会话字段之一：
+
+| 字段 | 效果 |
+| --- | --- |
+| `task_id` | 挂到已有的任务线程（回复链接复用该线程） |
+| `conversation_id` | **在该对话下自动新开一条线程**——一个对话想发几封就发几封 |
+| `external_id` | 先生成/复用对话，再自动新开线程（最省事） |
+
+命中后邮件正文（纯文本和 HTML 两版）末尾自动追加：
 
 ```
 ——————————————————
@@ -347,68 +371,100 @@ http://127.0.0.1:8077/reply/eyJ0IjoidGFza18wN2EwYjk2NTQy...
 链接有效期至 2026-10-21 15:15
 ```
 
-同时这封邮件的内容会作为一条 `source=email` 的 `agent` 消息记入任务线程，控制台能看到「邮件 → 会话」的完整上下文。
+同时这封邮件的内容会作为一条 `source=email` 的 `agent` 消息记入线程，控制台能看到「邮件 → 会话」的完整上下文。
+响应的 `task_id` 是**实际使用/新建的线程 id**，`conversation_created` 告诉你这次是否新建了对话。
+
+不带任何会话字段就是「发完即走」的普通邮件（无回复链接）。
 
 ### 3) `GET /api/v1/reply/{token}` — 收件人侧（无需鉴权）
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/v1/reply/{token}` | 打开会话：返回 `session` + 完整 `messages` |
-| GET | `/api/v1/reply/{token}/messages` | 增量拉取新消息，支持 `wait_seconds` 长轮询 |
+| GET | `/api/v1/reply/{token}/messages` | 增量拉取新消息（**非阻塞**，回复页自己按间隔刷新） |
 | POST | `/api/v1/reply/{token}` | 用户回帖（`{content, author?}`），限流为每任务 60 条/小时 |
 | GET | `/api/v1/reply/{token}/link` | 用旧链接自助换一个新的（续期） |
 
 失败语义：签名不对 `401 invalid_signature`；被轮换掉 `401 token_revoked`；任务已关闭 `403 task_closed`（仍可只读查看历史）。
 
-### 4) `GET /api/v1/tasks/{task_id}/messages` — Agent 取回用户回复
+### 4) `GET /api/v1/inbox` — 定时任务拉取回复（核心接口）
+
+**一次取走全部对话的增量用户回复**，按 `seq` 升序；每条自带 `conversation_id` / `conversation_external_id` /
+`task_id` / `content` / `author` / `seq`，拿去就能分发。
+
+| 参数 | 说明 |
+| --- | --- |
+| `cursor` | 从哪个 `seq` 之后开始取。**省略则用服务端水位**（按 API 密钥记录） |
+| `limit` | 单次最多取多少条（1–200，默认 50） |
+| `role` | `user`（默认）/ `agent` / `system`；填 `all` 表示不限 |
+
+响应含 `items`、`count`、`by_conversation`（按会话聚合的便捷视图）、`cursor`、`next_cursor`、`has_more`、`watermark`。
+
+配套两个接口：
+
+| 方法 | 路径 | 权限 | 说明 |
+| --- | --- | --- | --- |
+| POST | `/api/v1/inbox/ack` | `tasks:write` | 把回复成功分发到各对话后调用，`{upto_seq: <next_cursor>}` 推进水位。**只增不减**，重复提交安全；`mark_read=true`（默认）会顺手清掉控制台的待回复计数 |
+| GET | `/api/v1/inbox/stats` | `tasks:read` | 还有多少回复没取走（`pending_messages` / `conversations_waiting`） |
+
+**投递语义（至少一次）**：先分发、后 ack。中途崩了最多重复投递一次，但不会漏；
+水位是全局单调递增的 `seq`（不是 `rowid`，删任务不会让游标倒退），且按 API 密钥隔离。
+
+### 5) `GET /api/v1/tasks/{task_id}/messages` — 单线程读取
 
 | 参数 | 说明 |
 | --- | --- |
 | `after_id` | 只取这条消息之后的新消息，避免重复处理 |
 | `role` | `user` / `agent` / `system` 过滤 |
-| `wait_seconds` | **长轮询**，最多阻塞 60 秒等新消息，用户一回帖立即返回（默认 `mark_read=true` 会把待回复计数清零） |
+| `mark_read` | 默认 `true`，把该任务的待回复计数清零 |
 | `include_link` | 是否顺带签发一个新的回复链接 |
 
-响应里 `messages` 与 `items` 是同一份数据（兼容别名），并附带上最新的 `task` 状态。
+响应里 `messages` 与 `items` 是同一份数据（兼容别名），并附带 `next_cursor`（最后一条的 `seq`）与最新 `task` 状态。
 
-### 5) 其余任务接口
+**服务端没有长轮询接口**；跨对话取回复请用 `/api/v1/inbox`。
+
+### 6) 其余任务接口
 
 | 方法 | 路径 | 权限 | 说明 |
 | --- | --- | --- | --- |
-| GET | `/api/v1/tasks` | `tasks:read` | 任务列表（`page` / `page_size` / `status` / `q`）+ 全局 `stats` |
+| POST | `/api/v1/tasks` | `tasks:write` | 建线程，拿 `task_id` 与 `reply_url`；可带 `conversation_id` 或 `external_id` 归组 |
+| GET | `/api/v1/tasks` | `tasks:read` | 任务列表（`page` / `page_size` / `status` / `q` / `conversation_id`）+ 全局 `stats` |
 | GET | `/api/v1/tasks/{id}` | `tasks:read` | 任务详情 + 会话线程 |
-| PATCH | `/api/v1/tasks/{id}` | `tasks:write` | 改标题 / Agent 名 / 状态 / 上下文 |
+| PATCH | `/api/v1/tasks/{id}` | `tasks:write` | 改标题 / Agent 名 / 状态 / 上下文 / 转挂对话 |
 | POST | `/api/v1/tasks/{id}/messages` | `tasks:write` | Agent 发消息；`notify_email: ["a@b.com"]` 可同时推一份邮件（自动带链接） |
 | POST | `/api/v1/tasks/{id}/close` | `tasks:write` | 关闭任务（回帖随即被拒） |
 | POST | `/api/v1/tasks/{id}/reopen` | `tasks:write` | 重新打开 |
 | POST | `/api/v1/tasks/{id}/reply-link` | `tasks:write` | **轮换链接：此前发出的所有链接立即失效**（token 版本号 +1） |
 | DELETE | `/api/v1/tasks/{id}` | `tasks:write` | **删除任务及其全部会话消息**（不可恢复；邮件发送记录保留但解除关联）。控制台「任务会话」页也有「删除」按钮 |
 
-### 6) 最小可跑示例
+### 7) 最小可跑示例
 
 ```bash
 API=http://127.0.0.1:8077
 KEY=sk-agent-xxxxx
 
-# ① 启动任务
-TASK=$(curl -s -X POST $API/api/v1/tasks -H "X-API-Key: $KEY" \
+# ① 幂等拿一个对话（同一个 external_id 重复跑只会复用）
+CONV=$(curl -s -X POST $API/api/v1/conversations -H "X-API-Key: $KEY" \
   -H 'Content-Type: application/json' \
-  -d '{"title":"季度数据报表生成","agent_name":"ReportBot"}')
-TID=$(echo "$TASK" | python -c "import sys,json;print(json.load(sys.stdin)['data']['task_id'])")
+  -d '{"external_id":"codex:2026Q3-report","title":"季度数据报表生成","agent_name":"DeployBot"}')
+CID=$(echo "$CONV" | python -c "import sys,json;print(json.load(sys.stdin)['data']['conversation_id'])")
 
-# ② 发邮件（正文自动带回复链接）
+# ② 在这个对话下开线程发信（正文自动带回复链接），发完就走
 curl -s -X POST $API/api/v1/mail/send -H "X-API-Key: $KEY" \
   -H 'Content-Type: application/json' \
   -d "{\"to\":[\"you@example.com\"],\"subject\":\"报表已生成\",
        \"body\":\"2026-Q3 报表已生成，环比 +18.4%。要推送到正式库吗？\",
-       \"task_id\":\"$TID\"}"
+       \"conversation_id\":\"$CID\",\"thread_title\":\"报表是否推送\"}"
 
-# ③ 长轮询等用户回帖（最多阻塞 60 秒）
-curl -s "$API/api/v1/tasks/$TID/messages?role=user&wait_seconds=60" \
-  -H "X-API-Key: $KEY"
+# ③ 定时任务（cron 每 30 秒）：一次拉走全部对话的增量回复，再按 conversation_id 分发
+curl -s "$API/api/v1/inbox" -H "X-API-Key: $KEY"
 
-# ④ 不再需要时关闭任务，链接立即失效
-curl -s -X POST $API/api/v1/tasks/$TID/close -H "X-API-Key: $KEY" \
+# ④ 分发成功后推进水位（只增不减，重复提交安全）
+curl -s -X POST $API/api/v1/inbox/ack -H "X-API-Key: $KEY" \
+  -H 'Content-Type: application/json' -d '{"upto_seq": <上一步的 next_cursor>}'
+
+# ⑤ 不再需要时关闭对话，旗下线程的链接立即失效
+curl -s -X POST $API/api/v1/conversations/$CID/close -H "X-API-Key: $KEY" \
   -H 'Content-Type: application/json' -d '{}'
 ```
 
@@ -432,38 +488,51 @@ def dispatch(tool_name, args):
     ).json()
 ```
 
-当前暴露 **8 个工具**：
+当前暴露 **11 个工具**：
 
 | 工具 | 用途 |
 | --- | --- |
-| `send_email` | 发信。可带 `task_id`，正文自动附加回复链接 |
+| `send_email` | 发信。带 `task_id` / `conversation_id` / `external_id` 时正文自动附加回复链接 |
+| `ensure_conversation` | **按 `external_id` 幂等拿一个对话**（已存在就复用） |
+| `pull_inbox` | **定时任务主入口**：一次拉走全部对话的增量用户回复，按 `conversation_id` 分发 |
+| `ack_inbox` | 分发完成后推进水位（只增不减） |
 | `list_email_logs` | 查发送记录 |
 | `list_email_templates` | 查内置模板 |
 | `check_mail_connection` | SMTP 连通性自检 |
-| `create_task` | **启动任务，拿 `task_id` + `reply_url`** |
-| `get_task_messages` | 取会话消息（`wait_seconds` 长轮询等用户回帖） |
+| `create_task` | 建一条任务线程，拿 `task_id` + `reply_url`（可归到某个对话） |
+| `get_task_messages` | 单线程增量读取（无长轮询；跨对话请用 `pull_inbox`） |
 | `post_task_message` | 向任务线程发消息（可 `notify_email` 同时推一封） |
 | `close_task` | 关闭任务，回复链接随之失效 |
 
-一个典型 Agent 循环：
+一个典型 Agent 循环（**发完就走，回复靠 cron 拉**）：
 
 ```python
-tid = dispatch("create_task", {"title": "季度数据报表生成"})["data"]["task_id"]
+# ① 每个对话开局一次：同一个 external_id 重复调用只会复用
+cid = dispatch("ensure_conversation",
+               {"external_id": "codex:2026Q3-report", "title": "季度数据报表生成"})["data"]["conversation_id"]
 
+# ② 在这个对话下发信（服务端自动开线程并附回复链接）
 dispatch("send_email", {
     "to": ["you@example.com"],
     "subject": "报表已生成",
     "body": "2026-Q3 报表已生成，环比 +18.4%。是否推送到正式库？",
-    "task_id": tid,          # ← 关键：正文会自动附上回复链接
+    "conversation_id": cid,
+    "thread_title": "报表是否推送",
 })
 
-# 等用户点链接回帖（长轮询，最多阻塞 60 秒）
-reply = dispatch("get_task_messages", {"task_id": tid, "role": "user", "wait_seconds": 60})
+# ③ 不等用户，先去干别的（任务不会被自动关闭，链接默认 30 天有效）
+# ...
 
-dispatch("close_task", {"task_id": tid})   # 收工，链接立即失效
+# ④ 定时任务（cron 每 30 秒）：一次拿到全部对话的增量回复
+inbox = dispatch("pull_inbox", {})["data"]
+for item in inbox["items"]:
+    route_to_conversation(item["conversation_id"], item["content"])   # ← 分发回对应对话
+
+# ⑤ 分发成功后推进水位
+dispatch("ack_inbox", {"upto_seq": inbox["next_cursor"]})
 ```
 
-`GET /api/v1/agent/manifest` 里另有 `task_flow` 字段，直接给出上面这条链路的中文说明，方便把整段流程喂给模型。
+`GET /api/v1/agent/manifest` 里另有 `task_flow` 与 `reply_model` 字段，直接给出上面这条链路与投递语义的中文说明，方便把整段流程喂给模型。
 
 ---
 
@@ -491,6 +560,7 @@ dispatch("close_task", {"task_id": tid})   # 收工，链接立即失效
 | `sender_refused` | 502 | 发件地址与 SMTP 账号不一致 | ❌ |
 | `recipient_refused` | 502 | 收件人被服务器拒绝 | ❌ |
 | `task_not_found` | 404 | 任务不存在、已删除，或不属于当前账号 | — |
+| `conversation_not_found` | 404 | 对话不存在，或不属于当前账号 | 先 `POST /conversations` 幂等 ensure |
 | `key_not_found` | 404 | 密钥不存在或不属于当前账号 | — |
 | `user_not_found` | 404 | 用户不存在 | — |
 | `username_taken` | 409 | 用户名已存在 | — |
@@ -539,7 +609,15 @@ dispatch("close_task", {"task_id": tid})   # 收工，链接立即失效
 - **秒级吊销**：`tasks.token_version` 自增即让此前发出去的所有链接失效（`POST /tasks/{id}/reply-link`）。适合「链接误转到群里」的补救。关闭任务同样立即拒绝回帖。
 - **权限最小化**：持链接者只能读写**这一个任务**的会话，无法枚举其它任务，也拿不到任何 API Key 能力。
 - **重启不失效**：密钥优先取 `.env` 的 `REPLY_TOKEN_SECRET`，否则落到 `data/token_secret.txt`，服务重启后旧链接继续可用。
-- **前后端双长轮询**：Agent 侧用 `wait_seconds` 等用户回复，回复页用 `wait_seconds=25` 等 Agent 的新消息，双方都不空转轮询。
+- **回复走拉取，不走长轮询**：Agent 侧没有阻塞等待接口。定时任务用 `GET /api/v1/inbox` 一次性取走全部对话的增量回复，
+  再按 `conversation_id` 分发回各自对话；这样**一个进程能同时服务多个对话**，用户隔多久回复都不会丢，
+  Agent 也不会因为「在等一个人」而占住一整轮对话。回复页是普通间隔刷新（页面可见时 5 秒，后台标签页降到 15 秒）。
+- **游标用独立计数器，不用 rowid**：`task_messages.seq` 由 `counters` 表在同一个写事务里发号。
+  用 `rowid` 会在「删掉最后一行再插入」时被复用，导致游标倒退、消息被漏掉。
+- **水位只增不减 + 先分发后 ack**：至少一次投递。cron 中途崩了最多重复投递一次，不会漏；
+  水位按 API 密钥记录，进程重启也不用在本地存状态。
+- **对话按 `external_id` 幂等**：`(user_id, external_id)` 上建唯一索引，重复 ensure 只复用不新建，
+  所以 Agent 重启 / cron 重跑都不需要自己记住 `conversation_id`。两个账号可以用同一个 `external_id` 各建各的。
 - **公开路由与登录路由分离**：`/login` 与 `/reply/:token` 在路由表里标了 `meta.bare`，直接整页渲染、不套控制台外壳，因此不会被登录守卫拦下。
 
 ---
@@ -588,16 +666,17 @@ AGENT_API_KEY=sk-agent-xxxxx TEST_RECIPIENT=you@example.com \
   backend/.venv/Scripts/python.exe tests/test_task_flow.py --send
 ```
 
-覆盖 **88 项断言**，全程自清理（建的任务、建的账号都会删掉）：
+覆盖 **147 项断言**，全程自清理（建的对话、任务、账号都会删掉）：
 
 | 段落 | 内容 |
 | --- | --- |
 | 0 | `replylink.decorate()` 正文装饰纯函数 |
 | 1–3 | 建任务 → Agent 发消息 → 邮件内嵌回复链接（可选真实发信） |
-| 4–7 | 链接轮换吊销 → 免登录打开 → 用户回帖 → Agent 增量/长轮询取回 |
+| 4–7 | 链接轮换吊销 → 免登录打开 → 用户回帖 → Agent 增量取回（含消息 `seq` 与 `next_cursor`） |
 | 8–10 | 篡改签名 / 畸形令牌 / 无凭证访问 / 关闭任务 / 删除任务 |
+| 11–18 | **对话 + 收件箱**：幂等 ensure（不重复建）/ 一对话多线程 / 按对话过滤任务 / `/inbox` 一次拉全部对话 / 按会话分组 / ack 水位只增不减 / 不重复投递 / 显式 cursor 重放 / `inbox_stats` / 错误路径 / 删对话只解关联 |
 | B1–B2 | 登录成功与失败路径、会话令牌鉴权、仅管理员可建账号 |
-| B3 | **数据隔离**：新账号看不到任何既有数据；管理员与原 Agent 密钥也看不到新账号的任务（404） |
+| B3 | **数据隔离**：新账号看不到任何既有数据；管理员与原 Agent 密钥也看不到新账号的任务（404）；同 `external_id` 在另一账号下是另一条对话；**收件箱水位按密钥隔离** |
 | B4 | **每账号独立 SMTP**：回落全局 → 保存自己的配置 → 生效值切换 → 密码不回传 → 回复链接用自己域名 |
 | B5 | 改密踢下线 / 重置密码 / 停用后登录被拒且有会话失效 / 不能删自己 / 级联删除账号 |
 

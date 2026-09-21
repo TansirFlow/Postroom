@@ -12,7 +12,6 @@ const messages = ref([])
 const loading = ref(true)
 const fatal = ref(null) // {code, message}
 const sending = ref(false)
-const waiting = ref(false)
 const draft = ref('')
 const author = ref(localStorage.getItem('agent_reply_author') || '')
 const serverTime = ref('')
@@ -66,18 +65,15 @@ async function open() {
   }
 }
 
-/** 长轮询：挂在页面上时几乎能即时看到 Agent 的新消息 */
+/** 定时增量刷新：服务端已无长轮询，页面自己按固定间隔拉 Agent 的新消息。 */
 async function startPolling() {
   if (polling) return
   polling = true
   while (alive && !fatal.value) {
-    if (document.hidden) {
-      await new Promise((r) => setTimeout(r, 2000))
-      continue
-    }
+    // 页面不可见时降频，避免后台标签页空转
+    let delay = document.hidden ? 15000 : 5000
     try {
-      waiting.value = true
-      const data = await replyApi.poll(token.value, lastSeenId.value, 25)
+      const data = await replyApi.poll(token.value, lastSeenId.value)
       serverTime.value = data.server_time
       if (data.session) session.value = data.session
       if (data.messages?.length) {
@@ -90,10 +86,10 @@ async function startPolling() {
         fatal.value = { code: e.code, message: e.message }
         break
       }
-      await new Promise((r) => setTimeout(r, 3000))
-    } finally {
-      waiting.value = false
+      delay = 3000
     }
+    if (!alive || fatal.value) break
+    await new Promise((r) => setTimeout(r, delay))
   }
   polling = false
 }
@@ -206,12 +202,8 @@ onUnmounted(() => {
           </div>
         </template>
 
-        <div v-if="waiting && !sending" class="thread-row agent">
-          <div class="thread-avatar agent">AI</div>
-          <div class="thread-main">
-            <div class="thread-meta"><span class="muted">等待 Agent 消息…</span></div>
-            <div class="bubble bubble-agent typing"><span></span><span></span><span></span></div>
-          </div>
+        <div v-if="!sending" class="thread-auto-refresh">
+          页面每几秒自动刷新一次；Agent 收到你的回复后，新消息会自动出现在这里
         </div>
       </div>
 

@@ -22,7 +22,7 @@ class Settings(BaseSettings):
 
     # ---------- 服务 ----------
     app_name: str = "Postroom"
-    app_version: str = "1.0.0"
+    app_version: str = "1.1.0"
     env: str = "dev"
     host: str = "127.0.0.1"
     port: int = 8077

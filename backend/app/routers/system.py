@@ -80,6 +80,11 @@ async def overview(request: Request, principal: Principal = Depends(current_prin
             "public_base_url": mailer.base_url_for_user(principal.user_id, request),
             "mail_stats": stats,
             "task_stats": storage.task_stats(user_id=principal.user_id),
+            "conversation_stats": storage.conversation_stats(user_id=principal.user_id),
+            "inbox": {
+                "watermark": storage.get_inbox_watermark(principal.name, principal.user_id),
+                "latest_seq": storage.current_seq(),
+            },
             "keys": {
                 "count": storage.count_api_keys(user_id=principal.user_id),
                 "rate_limit_per_hour": settings.rate_limit_per_hour,
@@ -99,6 +104,9 @@ async def overview(request: Request, principal: Principal = Depends(current_prin
                 "mail.send",
                 "mail.logs",
                 "mail.templates",
+                "conversations.ensure",
+                "inbox.pull",
+                "inbox.ack",
                 "tasks.create",
                 "tasks.thread",
                 "tasks.reply_link",
