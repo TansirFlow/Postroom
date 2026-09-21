@@ -331,7 +331,7 @@ def _tools(base: str) -> list[dict]:
                         "notify_email": {
                             "type": "array",
                             "items": {"type": "string", "format": "email"},
-                            "description": "可选：覆盖本次通知地址；留空时沿用任务收件人或默认通知邮箱",
+                            "description": "可选：设置该任务的通知地址；留空时沿用任务收件人或默认通知邮箱",
                         },
                         "notify_subject": {"type": "string"},
                     },

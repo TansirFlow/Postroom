@@ -138,7 +138,7 @@ const startupPrompt = computed(() => `你是通过 Postroom 与人协作的 AI A
   5. 需要主动补充消息或通知对方时：
      POST /api/v1/tasks/<task_id>/messages
      {"content": "要回复的话"}
-     → 默认沿用该任务首次发信的收件人；也可以传 notify_email 临时覆盖本次通知地址
+     → 默认沿用该任务首次发信的收件人；也可以传 notify_email 设置并更新该任务的通知地址
   6. 任务完成后收尾：
      POST /api/v1/conversations/<conversation_id>/close
      或 POST /api/v1/tasks/<task_id>/close

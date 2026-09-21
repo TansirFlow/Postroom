@@ -163,7 +163,7 @@ class TaskMessageRequest(BaseModel):
     author: str | None = Field(default=None, max_length=80, description="显示名，默认取 Agent 名称")
     notify_email: list[EmailStr] | None = Field(
         default=None,
-        description="可选：覆盖本次通知地址；留空时沿用任务收件人或用户默认通知邮箱",
+        description="可选：设置该任务的通知地址；留空时沿用任务收件人或用户默认通知邮箱",
     )
     notify_subject: str | None = Field(default=None, max_length=300)
 

@@ -301,7 +301,7 @@ onMounted(loadList)
         </div>
         <textarea v-model="draft" rows="3" placeholder="追加一条 Agent 消息…" />
         <div class="row" style="margin-top: 10px">
-          <input v-model="notifyEmail" type="text" placeholder="覆盖通知邮箱（可选，多个用逗号分隔）" />
+          <input v-model="notifyEmail" type="text" placeholder="设置任务通知邮箱（可选，多个用逗号分隔）" />
           <button class="btn btn-primary" :disabled="busy || !draft.trim()" @click="sendAsAgent">发送</button>
         </div>
       </div>
