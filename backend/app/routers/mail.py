@@ -44,7 +44,9 @@ async def send_mail(
     # ---- 幂等：同一 idempotency_key 直接返回上次结果 ----
     if payload.idempotency_key:
         existed = storage.find_mail_log_by_idempotency(
-            payload.idempotency_key, user_id=principal.user_id
+            payload.idempotency_key,
+            user_id=principal.user_id,
+            api_key_name=principal.api_key_scope,
         )
         if existed:
             return ok(
@@ -119,7 +121,12 @@ async def send_mail(
     conversation_created: bool | None = None
 
     if payload.task_id:
-        task = storage.get_task(payload.task_id, user_id=principal.user_id, scoped=True)
+        task = storage.get_task(
+            payload.task_id,
+            user_id=principal.user_id,
+            scoped=True,
+            api_key_name=principal.api_key_scope,
+        )
         if not task:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -136,12 +143,15 @@ async def send_mail(
             convo, conversation_created = storage.ensure_conversation(
                 external_id=payload.external_id.strip(),
                 title=payload.thread_title,
-                api_key_name=principal.name,
+                api_key_name=principal.storage_owner,
                 user_id=principal.user_id,
             )
             conversation_id = convo["id"]
         elif not storage.get_conversation(
-            payload.conversation_id, principal.user_id, scoped=True
+            payload.conversation_id,
+            principal.user_id,
+            scoped=True,
+            api_key_name=principal.api_key_scope,
         ):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -160,7 +170,7 @@ async def send_mail(
         resolved_task_id = storage.create_task(
             title=payload.thread_title or subject,
             agent_name=principal.name,
-            api_key_name=principal.name,
+            api_key_name=principal.storage_owner,
             meta={"auto_created_by": "mail/send", "subject": subject},
             reply_expires_at=expires_at,
             user_id=principal.user_id,
@@ -209,7 +219,7 @@ async def send_mail(
             user_id=principal.user_id,
             request_id=request_id,
             client_ip=client_ip,
-            api_key_name=principal.name,
+            api_key_name=principal.storage_owner,
             sender=smtp.from_addr,
             to_addrs=to_list,
             cc_addrs=cc_list,
@@ -318,7 +328,12 @@ async def list_logs(
     return ok(
         request,
         storage.list_mail_logs(
-            page=page, page_size=page_size, status=status_filter, q=q, user_id=principal.user_id
+            page=page,
+            page_size=page_size,
+            status=status_filter,
+            q=q,
+            user_id=principal.user_id,
+            api_key_name=principal.api_key_scope,
         ),
     )
 
@@ -326,7 +341,9 @@ async def list_logs(
 @router.get("/logs/{log_id}", summary="查询单封邮件详情")
 async def get_log(log_id: str, request: Request, principal: Principal = Depends(current_principal)):
     principal.require("mail:read")
-    record = storage.get_mail_log(log_id, user_id=principal.user_id)
+    record = storage.get_mail_log(
+        log_id, user_id=principal.user_id, api_key_name=principal.api_key_scope
+    )
     if not record:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -338,7 +355,9 @@ async def get_log(log_id: str, request: Request, principal: Principal = Depends(
 @router.get("/stats", summary="发信统计")
 async def stats(request: Request, principal: Principal = Depends(current_principal)):
     principal.require("mail:read")
-    data = storage.mail_stats(user_id=principal.user_id)
+    data = storage.mail_stats(
+        user_id=principal.user_id, api_key_name=principal.api_key_scope
+    )
     data["rate_limit"] = ratelimit.snapshot(principal.name)
     return ok(request, data)
 

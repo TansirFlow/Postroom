@@ -50,7 +50,12 @@ def _task_public(task: dict) -> dict:
 
 def _load_task_or_404(task_id: str, principal: Principal) -> dict:
     """按当前账号取任务；别人的任务一律 404。"""
-    task = storage.get_task(task_id, user_id=principal.user_id, scoped=True)
+    task = storage.get_task(
+        task_id,
+        user_id=principal.user_id,
+        scoped=True,
+        api_key_name=principal.api_key_scope,
+    )
     if not task:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -81,12 +86,15 @@ async def create_task(
             external_id=payload.external_id.strip(),
             title=payload.title,
             agent_name=agent_name,
-            api_key_name=principal.name,
+            api_key_name=principal.storage_owner,
             user_id=principal.user_id,
         )
         conversation_id = convo["id"]
     elif conversation_id and not storage.get_conversation(
-        conversation_id, principal.user_id, scoped=True
+        conversation_id,
+        principal.user_id,
+        scoped=True,
+        api_key_name=principal.api_key_scope,
     ):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -96,7 +104,7 @@ async def create_task(
     task_id = storage.create_task(
         title=payload.title,
         agent_name=agent_name,
-        api_key_name=principal.name,
+        api_key_name=principal.storage_owner,
         meta=payload.meta,
         reply_expires_at=expires_at,
         user_id=principal.user_id,
@@ -157,9 +165,12 @@ async def list_tasks(
         q=q,
         user_id=principal.user_id,
         conversation_id=conversation_id,
+        api_key_name=principal.api_key_scope,
     )
     data["items"] = [_task_public(t) for t in data["items"]]
-    data["stats"] = storage.task_stats(user_id=principal.user_id)
+    data["stats"] = storage.task_stats(
+        user_id=principal.user_id, api_key_name=principal.api_key_scope
+    )
     return ok(request, data)
 
 
@@ -197,7 +208,10 @@ async def patch_task(
     principal.require("tasks:write")
     _load_task_or_404(task_id, principal)
     if payload.conversation_id and not storage.get_conversation(
-        payload.conversation_id, principal.user_id, scoped=True
+        payload.conversation_id,
+        principal.user_id,
+        scoped=True,
+        api_key_name=principal.api_key_scope,
     ):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -319,7 +333,7 @@ async def post_message(
             )
             storage.insert_mail_log(
                 user_id=principal.user_id,
-                api_key_name=principal.name,
+                api_key_name=principal.storage_owner,
                 sender=smtp.from_addr,
                 to_addrs=to_list,
                 subject=subject,
@@ -336,7 +350,7 @@ async def post_message(
         except mailer.MailError as exc:
             storage.insert_mail_log(
                 user_id=principal.user_id,
-                api_key_name=principal.name,
+                api_key_name=principal.storage_owner,
                 sender=smtp.from_addr,
                 to_addrs=to_list,
                 subject=subject,

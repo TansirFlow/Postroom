@@ -59,12 +59,16 @@ async def pull_inbox(
 ):
     principal.require("tasks:read")
 
-    watermark = storage.get_inbox_watermark(principal.name, principal.user_id)
+    watermark = storage.get_inbox_watermark(principal.inbox_owner, principal.user_id)
     effective = watermark if cursor is None else cursor
     role_filter = None if (role or "").lower() in ("all", "") else role
 
     items, next_cursor, has_more = storage.inbox_fetch(
-        user_id=principal.user_id, cursor=effective, limit=limit, role=role_filter
+        user_id=principal.user_id,
+        cursor=effective,
+        limit=limit,
+        role=role_filter,
+        api_key_name=principal.api_key_scope,
     )
 
     return ok(
@@ -95,9 +99,15 @@ async def ack_inbox(
 ):
     principal.require("tasks:write")
     watermark = storage.set_inbox_watermark(
-        principal.name, payload.upto_seq, principal.user_id
+        principal.inbox_owner, payload.upto_seq, principal.user_id
     )
-    cleared = storage.mark_read_upto(principal.user_id, payload.upto_seq) if payload.mark_read else 0
+    cleared = (
+        storage.mark_read_upto(
+            principal.user_id, payload.upto_seq, api_key_name=principal.api_key_scope
+        )
+        if payload.mark_read
+        else 0
+    )
     return ok(
         request,
         {
@@ -113,10 +123,14 @@ async def ack_inbox(
 @router.get("/stats", summary="收件箱概览（还有多少没取走）")
 async def inbox_stats(request: Request, principal: Principal = Depends(current_principal)):
     principal.require("tasks:read")
-    owner = principal.name
+    owner = principal.inbox_owner
     watermark = storage.get_inbox_watermark(owner, principal.user_id)
     pending, next_cursor, has_more = storage.inbox_fetch(
-        user_id=principal.user_id, cursor=watermark, limit=200, role="user"
+        user_id=principal.user_id,
+        cursor=watermark,
+        limit=200,
+        role="user",
+        api_key_name=principal.api_key_scope,
     )
     return ok(
         request,
@@ -127,8 +141,12 @@ async def inbox_stats(request: Request, principal: Principal = Depends(current_p
             "pending_more_than_200": has_more,
             "conversations_waiting": len(_group(pending)),
             "next_cursor": next_cursor,
-            "tasks": storage.task_stats(user_id=principal.user_id),
-            "conversations": storage.conversation_stats(user_id=principal.user_id),
+            "tasks": storage.task_stats(
+                user_id=principal.user_id, api_key_name=principal.api_key_scope
+            ),
+            "conversations": storage.conversation_stats(
+                user_id=principal.user_id, api_key_name=principal.api_key_scope
+            ),
             "server_time": storage.now_iso(),
         },
     )

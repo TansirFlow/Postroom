@@ -410,10 +410,13 @@ else:
     st, r = call("POST", "/api/v1/keys", {"name": f"k-{uniq}", "scopes": ["mail:send", "mail:read", "tasks:write", "tasks:read", "keys:manage"]}, token=user_token)
     user_key = (r.get("data") or {}).get("api_key") or ""
     check("新账号可自建密钥", st == 201 and bool(user_key), f"status={st}")
+    st, r = call("POST", "/api/v1/keys", {"name": f"k2-{uniq}", "scopes": ["mail:send", "mail:read", "tasks:write", "tasks:read"]}, token=user_token)
+    user_key_2 = (r.get("data") or {}).get("api_key") or ""
+    check("新账号可再建第二把密钥", st == 201 and bool(user_key_2), f"status={st}")
     st, r = call("POST", "/api/v1/keys", {"name": f"k2-{uniq}", "scopes": ["users:manage"]}, token=user_token)
     check("普通账号不能发放 users:manage", st == 403 and code_of(r) == "scope_not_allowed", f"status={st}")
 
-    st, r = call("POST", "/api/v1/tasks", {"title": f"隔离校验-{uniq}"}, token=user_token)
+    st, r = call("POST", "/api/v1/tasks", {"title": f"隔离校验-{uniq}"}, key=user_key)
     utid = (r.get("data") or {}).get("task_id") or ""
     check("新账号建任务 201", st == 201 and bool(utid), f"status={st}")
     st, r = call("GET", f"/api/v1/tasks/{utid}", key=user_key)
@@ -423,13 +426,43 @@ else:
     st, r = call("GET", f"/api/v1/tasks/{utid}", key=KEY)
     check("原 Agent 密钥看不到别人的任务（404）", st == 404, f"status={st}")
 
+    # 同一用户的两把 API Key：同名 external_id、任务和用户回复都必须各自独立。
+    dual_external_id = f"same-agent-session-{uniq}"
+    st, r = call("POST", "/api/v1/tasks", {"title": "Key-A 独立任务", "external_id": dual_external_id}, key=user_key)
+    dual_a = (r.get("data") or {})
+    dual_a_id = dual_a.get("task_id") or ""
+    dual_a_token = (dual_a.get("reply_url") or "").rsplit("/", 1)[-1]
+    st_a = st
+    st, r = call("POST", "/api/v1/tasks", {"title": "Key-B 独立任务", "external_id": dual_external_id}, key=user_key_2)
+    dual_b = (r.get("data") or {})
+    dual_b_id = dual_b.get("task_id") or ""
+    dual_b_token = (dual_b.get("reply_url") or "").rsplit("/", 1)[-1]
+    check("同账号不同密钥允许相同 external_id 建立两条任务", st_a == 201 and st == 201 and bool(dual_a_id) and bool(dual_b_id) and dual_a_id != dual_b_id)
+    st, r = call("GET", f"/api/v1/tasks/{dual_b_id}", key=user_key)
+    check("Key-A 看不到 Key-B 的任务", st == 404, f"status={st}")
+    st, r = call("GET", f"/api/v1/tasks/{dual_a_id}", key=user_key_2)
+    check("Key-B 看不到 Key-A 的任务", st == 404, f"status={st}")
+    st, r = call("POST", f"/api/v1/reply/{dual_a_token}", {"content": "只给 Key-A 的回复"}, auth=False)
+    check("Key-A 任务可收到用户回复", st == 201, f"status={st}")
+    st, r = call("POST", f"/api/v1/reply/{dual_b_token}", {"content": "只给 Key-B 的回复"}, auth=False)
+    check("Key-B 任务可收到用户回复", st == 201, f"status={st}")
+    st_a, r_a = call("GET", "/api/v1/inbox?cursor=0", key=user_key)
+    st_b, r_b = call("GET", "/api/v1/inbox?cursor=0", key=user_key_2)
+    inbox_a = (r_a.get("data") or {}).get("items") or []
+    inbox_b = (r_b.get("data") or {}).get("items") or []
+    check("Key-A 收件箱只收到自己的消息", st_a == 200 and any(i.get("task_id") == dual_a_id for i in inbox_a) and all(i.get("task_id") != dual_b_id for i in inbox_a))
+    check("Key-B 收件箱只收到自己的消息", st_b == 200 and any(i.get("task_id") == dual_b_id for i in inbox_b) and all(i.get("task_id") != dual_a_id for i in inbox_b))
+
     st, r = call("POST", "/api/v1/conversations", {"external_id": ext_id}, key=user_key)
     other_cid = (r.get("data") or {}).get("conversation_id") or ""
     check("同 external_id 在另一账号下是另一条会话（唯一索引按账号隔离）",
           st == 200 and bool(other_cid) and other_cid != cid, f"status={st} id={other_cid}")
     st, r = call("GET", "/api/v1/inbox", key=user_key)
     check("新账号收件箱看不到别人的回复",
-          st == 200 and not ((r.get("data") or {}).get("items")), f"status={st}")
+          st == 200 and not any(
+              item.get("conversation_id") == cid or item.get("task_id") == tid
+              for item in ((r.get("data") or {}).get("items") or [])
+          ), f"status={st}")
     st, r = call("GET", f"/api/v1/inbox/stats", key=user_key)
     check("新账号收件箱水位从 0 开始", (r.get("data") or {}).get("watermark") == 0, f"status={st}")
     st, r = call("GET", f"/api/v1/tasks?conversation_id={cid}", key=user_key)

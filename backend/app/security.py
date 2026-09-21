@@ -69,6 +69,23 @@ class Principal:
     def is_session(self) -> bool:
         return self.via == "session"
 
+    @property
+    def api_key_scope(self) -> str | None:
+        """API Key 按密钥 ID 隔离；网页会话查看本账号的全部数据。"""
+        if self.via == "api_key":
+            return self.key_id or self.name
+        return self.name if self.via == "env" else None
+
+    @property
+    def storage_owner(self) -> str:
+        """写入任务/会话/日志时使用的稳定归属标识。"""
+        return self.api_key_scope or self.name
+
+    @property
+    def inbox_owner(self) -> str:
+        """收件箱水位的归属标识；API Key 使用内部 ID，网页会话使用用户名。"""
+        return self.api_key_scope or self.name
+
     def require(self, scope: str) -> None:
         if scope in self.scopes:
             return

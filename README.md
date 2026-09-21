@@ -48,7 +48,7 @@ postroom/
 ├─ frontend/                    # Vue 3 + Vite 控制台
 │  └─ src/{App.vue,components/*,views/*,api.js,router.js,styles.css}
 ├─ tests/
-│  └─ test_task_flow.py         # 对话/收件箱 + 回复链接 + 多用户隔离端到端回归（自清理，149 项断言）
+│  └─ test_task_flow.py         # 对话/收件箱 + 回复链接 + 多用户隔离端到端回归（自清理，157 项断言）
 ├─ screenshots/                 # 登录页 / 使用教程 / 控制台 / 设置 / 用户管理 / 回复页截图
 ├─ LICENSE                      # MIT
 ├─ run-backend.cmd              # Windows 一键启动后端
@@ -197,7 +197,7 @@ npm run build
 | 发信记录 | `mail_logs.user_id`，列表、详情、统计、幂等键全部按账号 |
 | 任务会话 | `tasks.user_id`，别人的 `task_id` 一律返回 `404 task_not_found`（不泄露存在性） |
 | 对话 | `conversations.user_id`；`external_id` 的唯一索引也是**按账号**的，所以两个账号可以用同一个 `external_id` 各建各的对话，别人的 `conversation_id` 一律 `404 conversation_not_found` |
-| 收件箱拉取进度 | `inbox_watermarks.owner`（= API 密钥名）+ `user_id`，**按密钥隔离**；一把密钥 ack 不会推进另一把的水位 |
+| 收件箱拉取进度 | `inbox_watermarks.owner`（= API Key 内部 ID）+ `user_id`，**按密钥隔离**；一把密钥 ack 不会推进另一把的水位 |
 | SMTP / 对外地址 / 测试收件人 | `user_settings` 表，一行一个账号 |
 | 用户账号 | `users` 表，`role` = `admin` / `user` |
 
@@ -668,7 +668,7 @@ AGENT_API_KEY=sk-agent-xxxxx TEST_RECIPIENT=you@example.com \
   backend/.venv/Scripts/python.exe tests/test_task_flow.py --send
 ```
 
-覆盖 **149 项断言**，全程自清理（建的对话、任务、账号都会删掉）：
+覆盖 **157 项断言**，全程自清理（建的对话、任务、账号都会删掉）：
 
 | 段落 | 内容 |
 | --- | --- |
@@ -678,7 +678,7 @@ AGENT_API_KEY=sk-agent-xxxxx TEST_RECIPIENT=you@example.com \
 | 8–10 | 篡改签名 / 畸形令牌 / 无凭证访问 / 关闭任务 / 删除任务 |
 | 11–18 | **对话 + 收件箱**：幂等 ensure（不重复建）/ 一对话多线程 / 按对话过滤任务 / `/inbox` 一次拉全部对话 / 按会话分组 / ack 水位只增不减 / 不重复投递 / 显式 cursor 重放 / `inbox_stats` / 错误路径 / 删对话只解关联 |
 | B1–B2 | 登录成功与失败路径、会话令牌鉴权、仅管理员可建账号 |
-| B3 | **数据隔离**：新账号看不到任何既有数据；管理员与原 Agent 密钥也看不到新账号的任务（404）；同 `external_id` 在另一账号下是另一条对话；**收件箱水位按密钥隔离** |
+| B3 | **数据隔离**：新账号看不到任何既有数据；管理员与原 Agent 密钥也看不到新账号的任务（404）；同一账号的不同 API Key 可以使用相同 `external_id` 并拥有各自任务、会话和收件箱；**收件箱水位按密钥 ID 隔离** |
 | B4 | **每账号独立 SMTP**：回落全局 → 保存自己的配置 → 生效值切换 → 密码不回传 → 回复链接用自己域名 |
 | B5 | 改密踢下线 / 重置密码 / 停用后登录被拒且有会话失效 / 不能删自己 / 级联删除账号 |
 

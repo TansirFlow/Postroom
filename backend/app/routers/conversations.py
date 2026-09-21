@@ -45,7 +45,12 @@ def _conversation_public(convo: dict) -> dict:
 
 
 def _load_conversation_or_404(conversation_id: str, principal: Principal) -> dict:
-    convo = storage.get_conversation(conversation_id, principal.user_id, scoped=True)
+    convo = storage.get_conversation(
+        conversation_id,
+        principal.user_id,
+        scoped=True,
+        api_key_name=principal.api_key_scope,
+    )
     if not convo:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -68,7 +73,7 @@ async def ensure_conversation(
         external_id=(payload.external_id or "").strip() or None,
         title=payload.title,
         agent_name=payload.agent_name,
-        api_key_name=principal.name,
+        api_key_name=principal.storage_owner,
         meta=payload.meta,
         user_id=principal.user_id,
     )
@@ -99,10 +104,17 @@ async def list_conversations(
 ):
     principal.require("tasks:read")
     data = storage.list_conversations(
-        page=page, page_size=page_size, status=status_filter, q=q, user_id=principal.user_id
+        page=page,
+        page_size=page_size,
+        status=status_filter,
+        q=q,
+        user_id=principal.user_id,
+        api_key_name=principal.api_key_scope,
     )
     data["items"] = [_conversation_public(c) for c in data["items"]]
-    data["stats"] = storage.conversation_stats(user_id=principal.user_id)
+    data["stats"] = storage.conversation_stats(
+        user_id=principal.user_id, api_key_name=principal.api_key_scope
+    )
     return ok(request, data)
 
 
@@ -115,7 +127,9 @@ async def get_conversation(
 ):
     principal.require("tasks:read")
     convo = _load_conversation_or_404(conversation_id, principal)
-    tasks = storage.list_conversation_tasks(conversation_id, limit=task_limit)
+    tasks = storage.list_conversation_tasks(
+        conversation_id, limit=task_limit, api_key_name=principal.api_key_scope
+    )
     from .tasks import _task_public
 
     return ok(
@@ -164,7 +178,9 @@ async def close_conversation(
     _load_conversation_or_404(conversation_id, principal)
     storage.update_conversation(conversation_id, status="closed")
     closed = 0
-    for task in storage.list_conversation_tasks(conversation_id, limit=200):
+    for task in storage.list_conversation_tasks(
+        conversation_id, limit=200, api_key_name=principal.api_key_scope
+    ):
         if task["status"] == "open":
             storage.update_task(task["id"], status="closed")
             closed += 1

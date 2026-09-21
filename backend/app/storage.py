@@ -9,8 +9,10 @@
 - ``tasks``          —— 任务会话（归属于某个用户）
 - ``task_messages``  —— 会话消息（经 task_id 间接归属）
 
-数据隔离约定：凡带 ``user_id`` 参数的查询，传入具体值就只看该用户的数据，
-传入 ``None`` 则只看「无归属」的历史数据（永远不会退化成「看全部」）。
+数据隔离约定：凡带 ``user_id`` 参数的查询，传入具体值就只看该用户的数据；
+Agent API Key 查询还会追加 ``api_key_name``（实际存储 API Key 内部 ID）过滤，
+网页会话不追加该过滤，因此能查看本账号全部数据。传入 ``user_id=None`` 则只看
+「无归属」的历史数据（永远不会退化成「看全部」）。
 需要跨用户读取的只有两处：按哈希查密钥（登录/鉴权）与按令牌打开会话（回复页）。
 """
 from __future__ import annotations
@@ -71,7 +73,7 @@ CREATE TABLE IF NOT EXISTS mail_logs (
     created_at    TEXT NOT NULL,
     request_id    TEXT,
     client_ip     TEXT,
-    api_key_name  TEXT,
+    api_key_name  TEXT,  -- API Key 内部 ID；旧数据可能仍是密钥名称
     sender        TEXT,
     to_addrs      TEXT NOT NULL DEFAULT '[]',
     cc_addrs      TEXT NOT NULL DEFAULT '[]',
@@ -100,7 +102,7 @@ CREATE TABLE IF NOT EXISTS conversations (
     external_id       TEXT,                              -- Agent 侧的对话标识（如 codex/claude 会话 id）
     title             TEXT,
     agent_name        TEXT,
-    api_key_name      TEXT,
+    api_key_name      TEXT,  -- API Key 内部 ID；旧数据可能仍是密钥名称
     status            TEXT NOT NULL DEFAULT 'open',      -- open | closed
     meta              TEXT NOT NULL DEFAULT '{}',
     created_at        TEXT NOT NULL,
@@ -115,9 +117,9 @@ CREATE TABLE IF NOT EXISTS conversations (
 
 CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id, updated_at DESC);
 
--- 同一账号下 external_id 唯一：Agent 重复 ensure 同一个对话不会产生重复会话
+-- 同一账号、同一 API Key 下 external_id 唯一：不同 Key 可以拥有各自独立的同名会话
 CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_ext
-    ON conversations(user_id, external_id) WHERE external_id IS NOT NULL;
+    ON conversations(user_id, api_key_name, external_id) WHERE external_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS counters (
     name   TEXT PRIMARY KEY,
@@ -125,7 +127,7 @@ CREATE TABLE IF NOT EXISTS counters (
 );
 
 CREATE TABLE IF NOT EXISTS inbox_watermarks (
-    owner        TEXT PRIMARY KEY,   -- 拉取方标识（API 密钥名），NULL 归属用 '__anon__'
+    owner        TEXT PRIMARY KEY,   -- 拉取方标识（API Key 内部 ID），NULL 归属用 '__anon__'
     user_id      TEXT,
     watermark    INTEGER NOT NULL DEFAULT 0,
     updated_at   TEXT NOT NULL
@@ -137,7 +139,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     conversation_id   TEXT,
     title             TEXT,
     agent_name        TEXT,
-    api_key_name      TEXT,
+    api_key_name      TEXT,  -- API Key 内部 ID；旧数据可能仍是密钥名称
     status            TEXT NOT NULL DEFAULT 'open',   -- open | closed
     meta              TEXT NOT NULL DEFAULT '{}',
     created_at        TEXT NOT NULL,
@@ -234,7 +236,8 @@ def init_db() -> None:
         _migrate(conn)
         conn.execute(
             """CREATE UNIQUE INDEX IF NOT EXISTS idx_mail_logs_idem
-               ON mail_logs(idempotency_key) WHERE idempotency_key IS NOT NULL"""
+               ON mail_logs(user_id, api_key_name, idempotency_key)
+               WHERE idempotency_key IS NOT NULL"""
         )
         for ddl in POST_MIGRATE_INDEXES:
             conn.execute(ddl)
@@ -288,6 +291,55 @@ def _migrate(conn: sqlite3.Connection) -> None:
             if name not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
 
+    # 旧版本把密钥名称写进了 api_key_name。若该名称在该账号下唯一，
+    # 将其升级为不可重复的 API Key 内部 ID；无法唯一判断的历史数据保留原值。
+    for table in ("tasks", "conversations", "mail_logs"):
+        conn.execute(
+            f"""UPDATE {table}
+                   SET api_key_name = (
+                       SELECT k.id FROM api_keys k
+                        WHERE k.user_id = {table}.user_id
+                          AND k.name = {table}.api_key_name
+                   )
+                 WHERE {table}.api_key_name IS NOT NULL
+                   AND (
+                       SELECT COUNT(*) FROM api_keys k
+                        WHERE k.user_id = {table}.user_id
+                          AND k.name = {table}.api_key_name
+                   ) = 1"""
+        )
+    conn.execute(
+        """UPDATE inbox_watermarks
+              SET owner = (
+                  SELECT k.id FROM api_keys k
+                   WHERE k.user_id = inbox_watermarks.user_id
+                     AND k.name = inbox_watermarks.owner
+              )
+            WHERE inbox_watermarks.owner IS NOT NULL
+              AND (
+                  SELECT COUNT(*) FROM api_keys k
+                   WHERE k.user_id = inbox_watermarks.user_id
+                     AND k.name = inbox_watermarks.owner
+              ) = 1"""
+    )
+
+    # 旧版本只按 user_id + external_id 唯一；升级后允许同一用户的不同 API Key
+    # 各自使用相同 external_id，且不会影响旧数据。
+    conn.execute("DROP INDEX IF EXISTS idx_conversations_ext")
+    conn.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_ext
+           ON conversations(user_id, api_key_name, external_id)
+           WHERE external_id IS NOT NULL"""
+    )
+
+    # 幂等键也必须按 API Key 隔离，否则两个 Key 使用同一个幂等键会互相复用结果。
+    conn.execute("DROP INDEX IF EXISTS idx_mail_logs_idem")
+    conn.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS idx_mail_logs_idem
+           ON mail_logs(user_id, api_key_name, idempotency_key)
+           WHERE idempotency_key IS NOT NULL"""
+    )
+
 
 def _scope(user_id: str | None, where: list[str], params: list[Any]) -> None:
     """把「归属过滤」追加进 where。
@@ -299,6 +351,18 @@ def _scope(user_id: str | None, where: list[str], params: list[Any]) -> None:
         params.append(user_id)
     else:
         where.append("user_id IS NULL")
+
+
+def _owner_scope(
+    api_key_name: str | None,
+    where: list[str],
+    params: list[Any],
+    column: str = "api_key_name",
+) -> None:
+    """API Key 请求只看自己的数据；None 表示网页会话的全量视图。"""
+    if api_key_name is not None:
+        where.append(f"{column} = ?")
+        params.append(api_key_name)
 
 
 def _owned_user_id(user_id: str | None) -> str | None:
@@ -664,10 +728,12 @@ def list_mail_logs(
     status: str | None = None,
     q: str | None = None,
     user_id: str | None = None,
+    api_key_name: str | None = None,
 ) -> dict[str, Any]:
     where: list[str] = []
     params: list[Any] = []
     _scope(user_id, where, params)
+    _owner_scope(api_key_name, where, params)
     if status:
         where.append("status = ?")
         params.append(status)
@@ -694,11 +760,14 @@ def list_mail_logs(
     }
 
 
-def get_mail_log(log_id: str, user_id: str | None = None) -> dict[str, Any] | None:
+def get_mail_log(
+    log_id: str, user_id: str | None = None, api_key_name: str | None = None
+) -> dict[str, Any] | None:
     """按归属取单条发信记录（永远按 user_id 过滤，不会跨用户读到别人的记录）。"""
     where = ["id = ?"]
     params: list[Any] = [log_id]
     _scope(user_id, where, params)
+    _owner_scope(api_key_name, where, params)
     with db() as conn:
         row = conn.execute(
             f"SELECT * FROM mail_logs WHERE {' AND '.join(where)}", params
@@ -706,11 +775,14 @@ def get_mail_log(log_id: str, user_id: str | None = None) -> dict[str, Any] | No
     return _decode(row) if row else None
 
 
-def find_mail_log_by_idempotency(key: str, user_id: str | None = None) -> dict[str, Any] | None:
+def find_mail_log_by_idempotency(
+    key: str, user_id: str | None = None, api_key_name: str | None = None
+) -> dict[str, Any] | None:
     """幂等键按用户隔离：两个用户用同一个 key 互不影响。"""
     where = ["idempotency_key = ?"]
     params: list[Any] = [key]
     _scope(user_id, where, params)
+    _owner_scope(api_key_name, where, params)
     with db() as conn:
         row = conn.execute(
             f"SELECT * FROM mail_logs WHERE {' AND '.join(where)}", params
@@ -718,10 +790,11 @@ def find_mail_log_by_idempotency(key: str, user_id: str | None = None) -> dict[s
     return _decode(row) if row else None
 
 
-def mail_stats(user_id: str | None = None) -> dict[str, Any]:
+def mail_stats(user_id: str | None = None, api_key_name: str | None = None) -> dict[str, Any]:
     where: list[str] = []
     params: list[Any] = []
     _scope(user_id, where, params)
+    _owner_scope(api_key_name, where, params)
     clause = f"WHERE {' AND '.join(where)}"
     with db() as conn:
         rows = conn.execute(
@@ -749,7 +822,9 @@ def mail_stats(user_id: str | None = None) -> dict[str, Any]:
     }
 
 
-def recent_hour_count(minutes: int = 60, user_id: str | None = None) -> int:
+def recent_hour_count(
+    minutes: int = 60, user_id: str | None = None, api_key_name: str | None = None
+) -> int:
     """用于简单的滑动窗口配额统计。"""
     from datetime import timedelta
 
@@ -759,6 +834,7 @@ def recent_hour_count(minutes: int = 60, user_id: str | None = None) -> int:
     where = ["created_at >= ?"]
     params: list[Any] = [since]
     _scope(user_id, where, params)
+    _owner_scope(api_key_name, where, params)
     with db() as conn:
         return int(
             conn.execute(
@@ -818,7 +894,13 @@ def create_task(
     return task_id
 
 
-def get_task(task_id: str, user_id: str | None = None, *, scoped: bool = False) -> dict[str, Any] | None:
+def get_task(
+    task_id: str,
+    user_id: str | None = None,
+    *,
+    scoped: bool = False,
+    api_key_name: str | None = None,
+) -> dict[str, Any] | None:
     """取任务。
 
     ``scoped=False``（默认）不带归属过滤 —— 供回复页按令牌打开的路径使用；
@@ -828,6 +910,7 @@ def get_task(task_id: str, user_id: str | None = None, *, scoped: bool = False) 
     params: list[Any] = [task_id]
     if scoped:
         _scope(user_id, where, params)
+        _owner_scope(api_key_name, where, params)
     with db() as conn:
         row = conn.execute(
             f"SELECT * FROM tasks WHERE {' AND '.join(where)}", params
@@ -842,10 +925,12 @@ def list_tasks(
     q: str | None = None,
     user_id: str | None = None,
     conversation_id: str | None = None,
+    api_key_name: str | None = None,
 ) -> dict[str, Any]:
     where: list[str] = []
     params: list[Any] = []
     _scope(user_id, where, params)
+    _owner_scope(api_key_name, where, params)
     if status:
         where.append("status = ?")
         params.append(status)
@@ -1077,10 +1162,11 @@ def _recount_conversation(conn: sqlite3.Connection, conversation_id: str) -> Non
     )
 
 
-def task_stats(user_id: str | None = None) -> dict[str, Any]:
+def task_stats(user_id: str | None = None, api_key_name: str | None = None) -> dict[str, Any]:
     where: list[str] = []
     params: list[Any] = []
     _scope(user_id, where, params)
+    _owner_scope(api_key_name, where, params)
     clause = f"WHERE {' AND '.join(where)}"
     with db() as conn:
         total = int(conn.execute(f"SELECT COUNT(*) FROM tasks {clause}", params).fetchone()[0])
@@ -1164,12 +1250,17 @@ def create_conversation(
 
 
 def get_conversation(
-    conversation_id: str, user_id: str | None = None, *, scoped: bool = False
+    conversation_id: str,
+    user_id: str | None = None,
+    *,
+    scoped: bool = False,
+    api_key_name: str | None = None,
 ) -> dict[str, Any] | None:
     where = ["id = ?"]
     params: list[Any] = [conversation_id]
     if scoped:
         _scope(user_id, where, params)
+        _owner_scope(api_key_name, where, params)
     with db() as conn:
         row = conn.execute(
             f"SELECT * FROM conversations WHERE {' AND '.join(where)}", params
@@ -1178,11 +1269,12 @@ def get_conversation(
 
 
 def find_conversation_by_external_id(
-    external_id: str, user_id: str | None = None
+    external_id: str, user_id: str | None = None, api_key_name: str | None = None
 ) -> dict[str, Any] | None:
     where = ["external_id = ?"]
     params: list[Any] = [external_id]
     _scope(user_id, where, params)
+    _owner_scope(api_key_name, where, params)
     with db() as conn:
         row = conn.execute(
             f"SELECT * FROM conversations WHERE {' AND '.join(where)}", params
@@ -1204,7 +1296,7 @@ def ensure_conversation(
     返回 ``(conversation, created)``。并发下靠 idx_conversations_ext 唯一索引兜底。
     """
     if external_id:
-        existing = find_conversation_by_external_id(external_id, user_id)
+        existing = find_conversation_by_external_id(external_id, user_id, api_key_name)
         if existing:
             patch: dict[str, Any] = {}
             if title and not existing.get("title"):
@@ -1237,10 +1329,12 @@ def list_conversations(
     status: str | None = None,
     q: str | None = None,
     user_id: str | None = None,
+    api_key_name: str | None = None,
 ) -> dict[str, Any]:
     where: list[str] = []
     params: list[Any] = []
     _scope(user_id, where, params)
+    _owner_scope(api_key_name, where, params)
     if status:
         where.append("status = ?")
         params.append(status)
@@ -1281,12 +1375,17 @@ def update_conversation(conversation_id: str, **fields: Any) -> bool:
     return cur.rowcount > 0
 
 
-def list_conversation_tasks(conversation_id: str, limit: int = 50) -> list[dict[str, Any]]:
+def list_conversation_tasks(
+    conversation_id: str, limit: int = 50, api_key_name: str | None = None
+) -> list[dict[str, Any]]:
+    where = ["conversation_id = ?"]
+    params: list[Any] = [conversation_id]
+    _owner_scope(api_key_name, where, params)
     with db() as conn:
         rows = conn.execute(
-            """SELECT * FROM tasks WHERE conversation_id = ?
+            f"""SELECT * FROM tasks WHERE {' AND '.join(where)}
                ORDER BY created_at DESC LIMIT ?""",
-            (conversation_id, max(1, min(limit, 200))),
+            params + [max(1, min(limit, 200))],
         ).fetchall()
     return [_task_row(r) for r in rows]
 
@@ -1301,10 +1400,13 @@ def delete_conversation(conversation_id: str) -> bool:
         return cur.rowcount > 0
 
 
-def conversation_stats(user_id: str | None = None) -> dict[str, Any]:
+def conversation_stats(
+    user_id: str | None = None, api_key_name: str | None = None
+) -> dict[str, Any]:
     where: list[str] = []
     params: list[Any] = []
     _scope(user_id, where, params)
+    _owner_scope(api_key_name, where, params)
     clause = f"WHERE {' AND '.join(where)}"
     with db() as conn:
         total = int(conn.execute(f"SELECT COUNT(*) FROM conversations {clause}", params).fetchone()[0])
@@ -1338,11 +1440,13 @@ def inbox_fetch(
     cursor: int = 0,
     limit: int = 50,
     role: str | None = "user",
+    api_key_name: str | None = None,
 ) -> tuple[list[dict[str, Any]], int, bool]:
     """取 seq > cursor 的消息（默认只取用户回复），按 seq 升序。"""
     where = ["t.user_id " + ("= ?" if user_id else "IS NULL"), "tm.seq > ?"]
     params: list[Any] = [user_id] if user_id else []
     params.append(max(0, int(cursor)))
+    _owner_scope(api_key_name, where, params, "t.api_key_name")
     if role:
         where.append("tm.role = ?")
         params.append(role)
@@ -1420,13 +1524,18 @@ def set_inbox_watermark(owner: str | None, watermark: int, user_id: str | None =
     return target
 
 
-def mark_read_upto(user_id: str | None, watermark: int) -> int:
+def mark_read_upto(
+    user_id: str | None, watermark: int, api_key_name: str | None = None
+) -> int:
     """把游标以内的用户回复视为「已被 Agent 取回」，清掉控制台的待回复计数。
 
     注意与 inbox 水位是两件事：水位管「cron 分发到哪了」，unread 管「控制台还显不显示待处理」。
     """
     clause = "t.user_id = ?" if user_id else "t.user_id IS NULL"
     params: list[Any] = [user_id] if user_id else []
+    if api_key_name is not None:
+        clause += " AND t.api_key_name = ?"
+        params.append(api_key_name)
     cutoff = max(0, int(watermark))
     with db() as conn:
         rows = conn.execute(

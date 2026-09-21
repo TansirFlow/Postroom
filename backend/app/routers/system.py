@@ -53,7 +53,9 @@ async def site(request: Request):
 async def overview(request: Request, principal: Principal = Depends(current_principal)):
     principal.require("mail:read")
     smtp = mailer.smtp_for_user(principal.user_id)
-    stats = storage.mail_stats(user_id=principal.user_id)
+    stats = storage.mail_stats(
+        user_id=principal.user_id, api_key_name=principal.api_key_scope
+    )
     return ok(
         request,
         {
@@ -79,10 +81,14 @@ async def overview(request: Request, principal: Principal = Depends(current_prin
             },
             "public_base_url": mailer.base_url_for_user(principal.user_id, request),
             "mail_stats": stats,
-            "task_stats": storage.task_stats(user_id=principal.user_id),
-            "conversation_stats": storage.conversation_stats(user_id=principal.user_id),
+            "task_stats": storage.task_stats(
+                user_id=principal.user_id, api_key_name=principal.api_key_scope
+            ),
+            "conversation_stats": storage.conversation_stats(
+                user_id=principal.user_id, api_key_name=principal.api_key_scope
+            ),
             "inbox": {
-                "watermark": storage.get_inbox_watermark(principal.name, principal.user_id),
+                "watermark": storage.get_inbox_watermark(principal.inbox_owner, principal.user_id),
                 "latest_seq": storage.current_seq(),
             },
             "keys": {
