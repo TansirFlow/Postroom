@@ -1,0 +1,21 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+backend/data/
+backend/.env
+
+# ---- Node ----
+node_modules/
+frontend/dist/
+npm-debug.log*
+.vite/
+
+# ---- misc ----
+_shots/
+_prof/
+.DS_Store
+.idea/
+.vscode/
+*.log
