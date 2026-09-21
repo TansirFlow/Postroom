@@ -1351,9 +1351,151 @@ pre.code {
   color: #0d7a3d;
 }
 
+/* ---------------- 使用教程 ---------------- */
+/* 顶层用 .grid 的单列模式统一行间距，抵消 .card + .card 的 margin 叠加 */
+.tut-page > .card + .card {
+  margin-top: 0;
+}
+
+.tut-hero {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+  padding: 20px 22px;
+  background: linear-gradient(120deg, var(--primary-weak) 0%, var(--panel) 62%);
+}
+
+.tut-hero-title {
+  font-size: 19px;
+  font-weight: 650;
+  letter-spacing: 0.2px;
+}
+
+.tut-hero-sub {
+  margin-top: 5px;
+  font-size: 13.5px;
+  color: var(--text-2);
+}
+
+.tut-hero-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.tut-hero-chips .chip {
+  cursor: default;
+}
+
+.tut-hero-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+}
+
+.steps {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.step {
+  display: flex;
+  gap: 13px;
+}
+
+.step-num {
+  flex: 0 0 26px;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  background: var(--primary);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 2px;
+}
+
+.step-body {
+  min-width: 0;
+  flex: 1;
+}
+
+.step-title {
+  font-size: 14px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.step-text {
+  margin-top: 4px;
+  font-size: 13.2px;
+  color: var(--text-2);
+}
+
+.step-hint {
+  margin-top: 6px;
+  padding: 8px 11px;
+  border-left: 3px solid var(--border-strong);
+  background: var(--panel-2);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  font-size: 12.6px;
+  color: var(--muted);
+}
+
+.tut-prompt {
+  max-height: 460px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.tut-checks {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.tut-checks li {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  font-size: 13.2px;
+  color: var(--text-2);
+}
+
+.tut-check-mark {
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--success-weak);
+  color: var(--success);
+  font-size: 11px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 2px;
+}
+
 @media (max-width: 760px) {
   .form-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .tut-hero-actions {
+    margin-left: 0;
   }
 }
 

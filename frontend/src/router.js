@@ -10,6 +10,7 @@ import Reply from './views/Reply.vue'
 import Login from './views/Login.vue'
 import Settings from './views/Settings.vue'
 import Users from './views/Users.vue'
+import Guide from './views/Guide.vue'
 
 import { authEvents, clearSession, isAdmin, isLoggedIn, state } from './api'
 
@@ -19,6 +20,7 @@ export const router = createRouter({
     // 登录页：独立整页布局，未登录可访问
     { path: '/login', name: 'login', component: Login, meta: { bare: true, public: true, title: '登录' } },
     { path: '/', name: 'dashboard', component: Dashboard, meta: { title: '概览' } },
+    { path: '/guide', name: 'guide', component: Guide, meta: { title: '使用教程' } },
     { path: '/compose', name: 'compose', component: Compose, meta: { title: '发信工作台' } },
     { path: '/tasks', name: 'tasks', component: Tasks, meta: { title: '任务会话' } },
     { path: '/tasks/:id', name: 'task-detail', component: Tasks, meta: { title: '任务会话' } },

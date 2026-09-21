@@ -291,7 +291,7 @@ onMounted(loadTools)
         <div class="card-body">
           <table>
             <tbody>
-              <tr><td class="mono">missing_api_key</td><td class="small">未携带 API Key（401）</td></tr>
+              <tr><td class="mono">missing_credentials</td><td class="small">请求未带任何凭证（401）</td></tr>
               <tr><td class="mono">invalid_api_key</td><td class="small">Key 无效或已停用（401）</td></tr>
               <tr><td class="mono">insufficient_scope</td><td class="small">权限不足（403）</td></tr>
               <tr><td class="mono">rate_limit_exceeded</td><td class="small">超出每小时配额（429）</td></tr>

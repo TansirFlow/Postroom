@@ -16,6 +16,10 @@ const isAdmin = computed(() => Boolean(state.user && state.user.is_admin))
 const navGroups = computed(() => {
   const groups = [
     {
+      label: '开始',
+      items: [{ path: '/guide', icon: '📘', text: '使用教程' }],
+    },
+    {
       label: '能力模块',
       items: [
         { path: '/', icon: '◈', text: '概览' },

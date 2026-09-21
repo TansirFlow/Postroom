@@ -47,7 +47,7 @@ postroom/
 │  └─ src/{App.vue,components/*,views/*,api.js,router.js,styles.css}
 ├─ tests/
 │  └─ test_task_flow.py         # 任务会话 + 回复链接 + 多用户隔离端到端回归（自清理，88 项断言）
-├─ screenshots/                 # 登录页 / 控制台 / 设置 / 用户管理 / 回复页截图
+├─ screenshots/                 # 登录页 / 使用教程 / 控制台 / 设置 / 用户管理 / 回复页截图
 ├─ LICENSE                      # MIT
 ├─ run-backend.cmd              # Windows 一键启动后端
 ├─ dev-frontend.cmd             # 前端开发模式（热更新，端口 5173）
@@ -85,6 +85,9 @@ npm run build
 
 登录后请先到「系统设置」改密码；新账号在「用户管理」里创建。也可以改用 API Key 直接调接口（Agent 场景）。
 
+左侧「**开始 → 使用教程**」是一份按顺序的上手引导（配 SMTP → 建密钥 → 把接口交给 Agent），
+里面有一段可以直接复制给 Agent 的接入提示词，第一次部署完照着走一遍即可。
+
 **开发模式**：后端 `run.py`，前端 `dev-frontend.cmd`（Vite 5173，`/api` 已代理到 8077）。
 
 界面速览（`screenshots/`）：
@@ -92,6 +95,7 @@ npm run build
 | 文件 | 内容 |
 | --- | --- |
 | `login.png` | **登录页**（账号密码，无自助注册入口） |
+| `guide.png` | **使用教程**：登录后的上手引导（三步上手 / 任务闭环 / 可复制的接入提示词 / 报错排查 / 验收清单） |
 | `dashboard.png` | 控制台概览，含「待回复」告警与任务统计 |
 | `settings.png` | **系统设置**：本账号 SMTP / 对外地址 / 改密码 |
 | `users.png` | **用户管理**（仅管理员）：建账号、重置密码、启停 |
