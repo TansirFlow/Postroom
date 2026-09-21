@@ -111,7 +111,8 @@ KEY = "${key}"
 manifest = requests.get("${base.value}/api/v1/agent/tools").json()["data"]
 tools = manifest["tools"]        # OpenAI function-calling 格式，直接喂给模型
 print([t["function"]["name"] for t in tools])
-# ['send_email', 'list_email_logs', 'list_email_templates', 'check_mail_connection',
+# ['send_email', 'ensure_conversation', 'pull_inbox', 'ack_inbox',
+#  'list_email_logs', 'list_email_templates', 'check_mail_connection',
 #  'create_task', 'get_task_messages', 'post_task_message', 'close_task']
 
 # 2) 模型决定调用某个工具后，把参数原样转成 HTTP 请求

@@ -29,11 +29,11 @@ const steps = [
     linkText: '去建密钥',
   },
   {
-    title: '把接口交给 Agent',
+    title: '给 Agent 两段提示词',
     badge: '核心',
     badgeClass: 'badge-ok',
-    text: '复制右侧「接入提示词」，连同密钥一起发给你的 Agent / LLM。它会先 GET /api/v1/agent/tools 拿到工具清单，再按清单里的 method + endpoint + parameters 组装请求，不需要你手写接口。',
-    hint: '工具清单是 OpenAI function-calling 格式，可以直接当作模型的 tools 参数使用。回复是「拉取式」的：Agent 用 GET /api/v1/inbox 增量取，不用等、不用长轮询。完整接口列表见「接口文档」。',
+    text: '任务开始时，把「任务启动提示词」发给负责当前工作的 AI；另外把「定时拉取提示词」交给 cron / 定时 Agent，让它周期性读取用户回复。两段职责分开，任务 Agent 不需要阻塞等待。',
+    hint: '两段提示词都会先要求 Agent 读取工具清单；启动提示词负责建对话、发首封邮件，定时提示词只负责 GET /api/v1/inbox、分发回复和 ack。',
     to: '/docs',
     linkText: '去接口文档',
   },
@@ -112,49 +112,33 @@ const checks = [
   '「概览」页的今日发信量、成功率随之变化',
 ]
 
-// ---------------------------------------------------------------- 接入提示词
-const prompt = computed(() => `你是通过 Postroom 发邮件的助手。请遵守下面的约定。
+// ---------------------------------------------------------------- Agent 提示词（启动任务 / 定时拉取分开）
+const startupPrompt = computed(() => `你是通过 Postroom 与人协作的 AI Agent。下面是“任务启动时”的规则；只负责当前任务的开局与推进，不要在本次任务里阻塞等待用户回复。
 
 服务地址  ${base.value}
 鉴权      每个请求都要带请求头  X-API-Key: ${KEY_PLACEHOLDER}
 
-【第一步】先拿到工具清单，不要凭记忆猜字段：
+【第一步：发现工具】不要凭记忆猜字段，先调用：
   GET ${base.value}/api/v1/agent/tools
-  返回的是 OpenAI function-calling 格式的 tools，按其中每项的 method + endpoint + parameters 组装请求。
+  返回的是 OpenAI function-calling 格式的 tools；按每项的 method + endpoint + parameters 组装请求。
 
-【发一封邮件】
-  POST /api/v1/mail/send
-  {"to": ["someone@example.com"], "subject": "标题", "body": "正文"}
-
-【需要对方回复时（对话 + 定时拉取）】
-  A. 每进一个新对话，先幂等拿一个会话 id（同一个 external_id 只会复用，不会重复建）：
+【任务开始】
+  1. 为当前外部对象选择稳定的 external_id（不要使用随机值）。
+  2. 幂等创建或复用对话，同一个 external_id 重复调用不会重复创建：
      POST /api/v1/conversations
      {"external_id": "codex:<你的会话 id>", "title": "本次任务名称", "agent_name": "你的名字"}
      → 记下返回的 conversation_id
-
-  B. 发信：带上会话 id（也可以只给 external_id，服务端会自动 ensure）
+  3. 需要人确认或回复时，在这个对话下发邮件：
      POST /api/v1/mail/send
      {"conversation_id": "<上一步的 id>", "thread_title": "标题", "to": [...], "subject": "...", "body": "..."}
-     → 邮件正文会自动追加「点开即回复」按钮，不用自己拼链接
-
-  C. 发完就走，不要等。任务不会被自动关闭，回复链接默认 30 天有效。
-
-  D. 由定时任务（cron，建议每 30 秒）统一取回复，一次拿到全部对话的增量：
-     GET /api/v1/inbox            ← 不传 cursor 就用服务端水位，进程重启也不会重复投递
-     → 返回 items[]，每条带 conversation_id / external_id / task_id / content / seq
-     → 按 conversation_id 把消息送回对应的对话即可
-
-  E. 分发成功后确认水位（只增不减，重复提交安全）：
-     POST /api/v1/inbox/ack
-     {"upto_seq": <上一步返回的 next_cursor>}
-
-  F. 需要主动加一句 / 通知对方：
+     → 邮件正文会自动追加「点开即回复」按钮，不要自己拼 reply_url
+  4. 发完邮件后继续执行主任务，不要长轮询、不要等待用户。用户回复由另一段“定时拉取提示词”处理。
+  5. 需要主动补充消息或通知对方时：
      POST /api/v1/tasks/<task_id>/messages
      {"content": "要回复的话", "notify_email": ["someone@example.com"]}
-
-  G. 收尾：关闭对话或单条任务，回复链接立即失效
+  6. 任务完成后收尾：
      POST /api/v1/conversations/<conversation_id>/close
-     POST /api/v1/tasks/<task_id>/close
+     或 POST /api/v1/tasks/<task_id>/close
 
 【响应契约】
   所有接口都返回 {"ok": bool, "data": ..., "error": {"code", "message"}, "request_id": "..."}
@@ -166,13 +150,41 @@ const prompt = computed(() => `你是通过 Postroom 发邮件的助手。请遵
   排查不确定的错误时，带上 request_id 找管理员查日志。
 
 【注意】
-  回复链接是敏感凭证，不要转发到公开渠道；需要作废时调 /tasks/<id>/reply-link 轮换。`)
+  回复链接是敏感凭证，不要转发到公开渠道；需要作废时调用 POST /api/v1/tasks/<id>/reply-link 轮换。
+  不要把 API Key 或 reply_url 写入公开日志、代码仓库或发给无关人员。`)
+
+const pollingPrompt = computed(() => `你是 Postroom 的定时收件箱 Agent。下面是“定时拉取用户回复”的规则；你不负责创建任务、不负责发首封邮件，只负责周期性拉取、分发和确认水位。
+
+服务地址  ${base.value}
+鉴权      每个请求都要带请求头  X-API-Key: ${KEY_PLACEHOLDER}
+运行频率  建议每 30 秒执行一次；不要使用长轮询，不要因为没有新消息而持续占用进程。
+
+【每次运行】
+  1. 先调用 GET ${base.value}/api/v1/agent/tools，必要时刷新工具定义；不要凭记忆猜参数。
+  2. 调用 GET /api/v1/inbox。不传 cursor，服务端会按这把 API Key 保存的水位返回增量消息。
+  3. 如果 items[] 为空，直接结束本轮，不要伪造消息，也不必 ack。
+  4. 如果有消息，按 seq 从小到大处理；使用 conversation_id（以及 conversation_external_id）把每条 content / author / task_id 分发回对应的 AI 对话。
+  5. 只有当本轮所有连续消息都已经成功分发后，才调用：
+     POST /api/v1/inbox/ack
+     {"upto_seq": <本次响应的 next_cursor>}
+     ack 的水位只增不减，重复提交安全。
+
+【失败处理】
+  - 分发中途失败：不要 ack 到失败消息之后；保留未确认消息，下一轮重试。
+  - 401 / 403：停止重试并报告鉴权或权限问题。
+  - 429：等待下一个调度周期。
+  - 5xx 或网络错误：保留水位，稍后重试。
+  - 不要为了“清空收件箱”直接 ack 一个没有成功处理的 next_cursor；系统采用至少一次投递，宁可重复，不能漏消息。
+
+【响应契约】
+  所有接口都返回 {"ok": bool, "data": ..., "error": {"code", "message"}, "request_id": "..."}。
+  排查不确定的错误时，带上 request_id 找管理员查日志。`)
 
 async function copy(text, tag) {
   try {
     await navigator.clipboard.writeText(text)
     copied.value = tag
-    toast(tag === 'prompt' ? '已复制接入提示词' : '已复制')
+    toast(tag === 'startup' ? '已复制任务启动提示词' : '已复制定时拉取提示词')
     setTimeout(() => (copied.value = ''), 1600)
   } catch (e) {
     toast('复制失败，请手动选中复制', 'warn')
@@ -282,21 +294,37 @@ async function copy(text, tag) {
       </div>
 
       <div>
-        <!-- 接入提示词 -->
+        <!-- Agent 提示词 -->
         <div class="card">
           <div class="card-head">
-            <div class="card-title">接入提示词</div>
-            <div class="card-desc">复制给 Agent 即可</div>
-            <div class="spacer" />
-            <button class="btn btn-sm btn-primary" @click="copy(prompt, 'prompt')">
-              {{ copied === 'prompt' ? '已复制' : '复制' }}
-            </button>
+            <div class="card-title">Agent 提示词</div>
+            <div class="card-desc">按使用场景分别复制</div>
           </div>
           <div class="card-body">
             <div class="small muted" style="margin-bottom: 8px">
-              把 <span class="mono">{{ KEY_PLACEHOLDER }}</span> 换成你刚建的真实密钥，再发给 Agent / LLM。
+              把 <span class="mono">{{ KEY_PLACEHOLDER }}</span> 换成真实密钥。任务启动提示词给当前任务 Agent；定时拉取提示词给 cron 或专门的后台 Agent。
             </div>
-            <pre class="code tut-prompt">{{ prompt }}</pre>
+            <div class="step-title" style="margin-top: 12px">
+              ① 任务启动提示词
+              <button class="btn btn-sm btn-primary" style="float: right" @click="copy(startupPrompt, 'startup')">
+                {{ copied === 'startup' ? '已复制' : '复制' }}
+              </button>
+            </div>
+            <div class="small muted" style="margin: 5px 0 8px">
+              每个新任务 / 新对话开始时使用；负责 ensure 对话、发首封邮件、继续主任务。
+            </div>
+            <pre class="code tut-prompt">{{ startupPrompt }}</pre>
+
+            <div class="step-title" style="margin-top: 16px">
+              ② 定时拉取提示词
+              <button class="btn btn-sm btn-primary" style="float: right" @click="copy(pollingPrompt, 'polling')">
+                {{ copied === 'polling' ? '已复制' : '复制' }}
+              </button>
+            </div>
+            <div class="small muted" style="margin: 5px 0 8px">
+              每 30 秒左右执行一次；只负责拉取、分发和 ack，不创建任务，也不等待单个用户。
+            </div>
+            <pre class="code tut-prompt">{{ pollingPrompt }}</pre>
           </div>
         </div>
 

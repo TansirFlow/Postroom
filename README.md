@@ -88,7 +88,7 @@ npm run build
 登录后请先到「系统设置」改密码；新账号在「用户管理」里创建。也可以改用 API Key 直接调接口（Agent 场景）。
 
 左侧「**开始 → 使用教程**」是一份按顺序的上手引导（配 SMTP → 建密钥 → 把接口交给 Agent），
-里面有一段可以直接复制给 Agent 的接入提示词，第一次部署完照着走一遍即可。
+里面提供两段可以分别复制的提示词：**任务启动提示词**负责建对话、发首封邮件和推进任务；**定时拉取提示词**负责周期性拉取 `/inbox`、分发回复和 ack。第一次部署完照着走一遍即可。
 
 **开发模式**：后端 `run.py`，前端 `dev-frontend.cmd`（Vite 5173，`/api` 已代理到 8077）。
 
@@ -472,6 +472,8 @@ curl -s -X POST $API/api/v1/conversations/$CID/close -H "X-API-Key: $KEY" \
 
 ## 六、把 Agent 接进来
 
+推荐把 Agent 接入拆成两个职责：任务启动提示词交给当前工作的 AI，定时拉取提示词交给 cron 或常驻后台 Agent。前者发完邮件后立即继续主任务，后者周期性调用 `GET /api/v1/inbox`，只有在回复分发成功后才调用 `POST /api/v1/inbox/ack`。控制台「使用教程」页提供了两段可直接复制的完整提示词。
+
 ```python
 import requests
 
@@ -666,7 +668,7 @@ AGENT_API_KEY=sk-agent-xxxxx TEST_RECIPIENT=you@example.com \
   backend/.venv/Scripts/python.exe tests/test_task_flow.py --send
 ```
 
-覆盖 **147 项断言**，全程自清理（建的对话、任务、账号都会删掉）：
+覆盖 **149 项断言**，全程自清理（建的对话、任务、账号都会删掉）：
 
 | 段落 | 内容 |
 | --- | --- |
