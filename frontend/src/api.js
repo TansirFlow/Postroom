@@ -9,6 +9,8 @@ export const state = reactive({
   apiKey: localStorage.getItem(KEY_STORAGE) || '',
   toasts: [],
   health: { ok: null, latency: null, checkedAt: null },
+  // 站点展示信息（应用名 / 备案号），由 /api/v1/site 填充
+  site: { app: '', version: '', icp: '', icpUrl: '' },
 })
 
 export function setApiKey(key) {
@@ -90,6 +92,22 @@ export const api = {
     }
     return data
   },
+}
+
+/** 站点信息（应用名 / ICP 备案号）。公开接口，无 Key 也能拿到。 */
+export async function loadSiteInfo() {
+  try {
+    const data = await request('/api/v1/site', { auth: false })
+    state.site = {
+      app: data?.app || '',
+      version: data?.version || '',
+      icp: data?.icp_license || '',
+      icpUrl: data?.icp_license_url || 'https://beian.miit.gov.cn/',
+    }
+  } catch (e) {
+    /* 页脚属于锦上添花，拿不到就静默不显示 */
+  }
+  return state.site
 }
 
 export function fmtTime(iso) {

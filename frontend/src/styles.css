@@ -1117,3 +1117,28 @@ pre.code {
   }
 }
 
+/* ---------------- 站点页脚（ICP 备案号） ---------------- */
+.site-footer {
+  margin-top: 26px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.8;
+  color: var(--muted);
+}
+
+.reply-page .site-footer {
+  margin-top: auto; /* 回复页是整页 flex 布局，页脚压到底部 */
+  padding: 14px 20px 18px;
+}
+
+.site-footer a {
+  color: var(--muted);
+  transition: color 0.15s ease;
+}
+
+.site-footer a:hover {
+  color: var(--primary);
+}
+

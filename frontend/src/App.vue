@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { api, setApiKey, state, toast } from './api'
+import SiteFooter from './components/SiteFooter.vue'
 
 const route = useRoute()
 const keyInput = ref(state.apiKey)
@@ -148,6 +149,7 @@ watch(() => route.path, loadTaskStats)
           <span class="small">首次启动的密钥会打印在后端控制台，并保存在 backend/data/keys.txt</span>
         </div>
         <router-view />
+        <SiteFooter />
       </main>
     </div>
 

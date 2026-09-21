@@ -37,6 +37,20 @@ async def health(request: Request):
     )
 
 
+@router.get("/site", summary="公开站点信息（无需鉴权）")
+async def site(request: Request):
+    """前端页脚 / 品牌信息。只暴露与站点展示相关、可公开的字段。"""
+    return ok(
+        request,
+        {
+            "app": settings.app_name,
+            "version": settings.app_version,
+            "icp_license": settings.icp_license,
+            "icp_license_url": settings.icp_license_url,
+        },
+    )
+
+
 @router.get("/overview", summary="控制台概览数据")
 async def overview(request: Request, principal: Principal = Depends(current_principal)):
     principal.require("mail:read")

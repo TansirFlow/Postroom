@@ -66,6 +66,12 @@ class Settings(BaseSettings):
     # 单条消息最大长度
     message_max_chars: int = 4000
 
+    # ---------- 站点信息 / 备案（部署后由管理员填写） ----------
+    # 页脚悬挂的备案号，如 "苏ICP备2026000000号"；留空则页脚不显示
+    icp_license: str = ""
+    # 备案号点击跳转的地址，默认工信部备案管理系统
+    icp_license_url: str = "https://beian.miit.gov.cn/"
+
     # ---------- CORS ----------
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 

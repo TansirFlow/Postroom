@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { fmtClock, fmtTime, replyApi, state, timeAgo, toast } from '../api'
+import SiteFooter from '../components/SiteFooter.vue'
 
 const route = useRoute()
 const token = computed(() => route.params.token)
@@ -143,7 +144,7 @@ onUnmounted(() => {
   <div class="reply-page">
     <header class="reply-head">
       <div class="reply-head-inner">
-        <div class="reply-brand"><span class="brand-logo">AI</span></div>
+        <div class="reply-brand"><span class="brand-logo">P</span></div>
         <div style="min-width: 0">
           <div class="reply-title">{{ session?.title || '与 Agent 的对话' }}</div>
           <div class="reply-sub">
@@ -238,6 +239,8 @@ onUnmounted(() => {
         </div>
       </div>
     </div>
+
+    <SiteFooter />
 
     <div class="toasts">
       <div v-for="t in state.toasts" :key="t.id" class="toast" :class="t.type">{{ t.message }}</div>

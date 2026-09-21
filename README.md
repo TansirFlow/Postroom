@@ -37,7 +37,7 @@ postroom/
 │  ├─ run.py                    # 启动脚本
 │  └─ .env.example              # 配置模板（复制为 .env 后由管理员填写；.env 不入库）
 ├─ frontend/                    # Vue 3 + Vite 控制台
-│  └─ src/{App.vue,views/*,api.js,router.js,styles.css}
+│  └─ src/{App.vue,components/*,views/*,api.js,router.js,styles.css}
 ├─ tests/
 │  └─ test_task_flow.py         # 任务会话 + 回复链接端到端回归（自清理，30 项断言）
 ├─ screenshots/                 # 控制台 & 回复页截图
@@ -113,6 +113,8 @@ npm run build
 | `SMTP_FROM_NAME` | `Postroom` | 收件人看到的发件人名字 |
 | `RATE_LIMIT_PER_HOUR` | `120` | 每密钥每小时发信上限 |
 | `TEST_RECIPIENTS` | 空 | 控制台「一键测试」用的收件人，逗号分隔。留空则该功能不显示 |
+| `ICP_LICENSE` | 空 | **页脚悬挂的 ICP 备案号**，如 `苏ICP备2026000000号`。留空则页脚不渲染 |
+| `ICP_LICENSE_URL` | `https://beian.miit.gov.cn/` | 备案号点击跳转地址（默认工信部备案管理系统） |
 | `STORE_BODY_PREVIEW` | `true` | 是否在日志中留正文摘要（前 1500 字） |
 
 **任务会话 / 回复链接相关**
@@ -216,6 +218,7 @@ curl -X POST http://127.0.0.1:8077/api/v1/mail/send \
 | 方法 | 路径 | 权限 | 说明 |
 | --- | --- | --- | --- |
 | GET | `/api/v1/health` | — | 健康检查（无需鉴权） |
+| GET | `/api/v1/site` | — | 公开站点信息：应用名 / 版本 / **ICP 备案号**（无需鉴权，页脚用） |
 | GET | `/api/v1/agent/tools` | — | Agent 工具清单（function-calling 格式） |
 | GET | `/api/v1/agent/manifest` | — | 能力摘要 + 快速上手代码 |
 | GET | `/api/v1/whoami` | 任意 | 校验 Key 与权限 |
@@ -430,6 +433,8 @@ dispatch("close_task", {"task_id": tid})   # 收工，链接立即失效
 - **日志落库**：每次发送（含失败）都写 `mail_logs`，含耗时、大小、附件名、错误码、正文摘要；带 `task_id` 的还会记下当时的 `reply_url`。
 - **自动补列迁移**：`storage._migrate()` 给已存在的旧库补新列（`mail_logs.task_id` / `reply_url` 等），升级不丢数据。
 - **单端口交付**：前端构建产物由后端托管，`/assets` 走静态目录，其余路径回落 `index.html`（SPA 路由）。
+- **页脚备案号**：配置 `ICP_LICENSE` 后，**控制台与免登录回复页**的页脚都会悬挂备案号并链接到工信部；
+  留空则页脚整体不渲染。备案号属于部署方信息，仓库与默认配置里都不带。
 - **离线友好**：前端依赖全部打包进本地 `dist`，不引用任何 CDN；Swagger 页面除外（走 FastAPI 默认 CDN）。
 
 任务会话与回复链接的额外设计：
