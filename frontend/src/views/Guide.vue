@@ -24,7 +24,7 @@ const steps = [
     badge: '必做',
     badgeClass: 'badge-warn',
     text: '打开「API 密钥 → 新建密钥」，勾选权限。让 Agent 发信 + 收回复，给这四项就够：mail:send、mail:read、tasks:write、tasks:read。',
-    hint: '明文密钥只在创建那一次显示，之后只剩前缀；没存下来只能删掉重建。不要把密钥写进前端代码或公开仓库。',
+    hint: '密钥原文会在服务端加密保存，之后可回到「API 密钥」列表再次复制同一把 Key。不要把密钥写进前端代码或公开仓库。',
     to: '/keys',
     linkText: '去建密钥',
   },

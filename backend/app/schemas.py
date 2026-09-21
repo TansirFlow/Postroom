@@ -77,10 +77,14 @@ class KeyCreateRequest(BaseModel):
     note: str = ""
 
 
+class KeySecretImportRequest(BaseModel):
+    api_key: str = Field(..., min_length=8, max_length=300, description="已有 API Key 原文")
+
+
 class KeyCreatedResponse(BaseModel):
     id: str
     name: str
-    api_key: str = Field(..., description="明文密钥，仅此一次返回")
+    api_key: str = Field(..., description="API Key 原文；服务端加密保存，之后可再次复制")
     scopes: list[str]
     created_at: str
 

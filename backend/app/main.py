@@ -38,7 +38,7 @@ from .routers import (
     tasks,
     users,
 )
-from .security import ALL_SCOPES, generate_key, hash_key
+from .security import ALL_SCOPES, generate_key, hash_key, seal_api_key
 
 logging.basicConfig(
     level=logging.INFO,
@@ -209,6 +209,23 @@ def _bootstrap() -> dict:
 
     assert admin is not None  # 上面已保证
 
+    def recorded_key(label: str, expected_hash: str) -> str | None:
+        """仅用于升级旧版本 keys.txt 中已知的引导密钥，普通用户密钥无法从哈希恢复。"""
+        path = data_dir / "keys.txt"
+        if not path.exists():
+            return None
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return None
+        for line in reversed(lines):
+            if label not in line or "=" not in line:
+                continue
+            candidate = line.rsplit("=", 1)[1].strip()
+            if candidate and hash_key(candidate) == expected_hash:
+                return candidate
+        return None
+
     # ---- 2) 根密钥（.env 优先，其次 data/admin_key.txt，最后生成）----
     admin_file = data_dir / "admin_key.txt"
     if not settings.admin_api_key:
@@ -218,7 +235,8 @@ def _bootstrap() -> dict:
             settings.admin_api_key = generate_key("sk-admin")
             admin_file.write_text(settings.admin_api_key, encoding="utf-8")
             admin_file.chmod(0o600)
-    if not storage.find_api_key_by_hash(hash_key(settings.admin_api_key)):
+    existing_admin_key = storage.find_api_key_by_hash(hash_key(settings.admin_api_key))
+    if not existing_admin_key:
         storage.insert_api_key(
             name="admin",
             key_hash=hash_key(settings.admin_api_key),
@@ -226,6 +244,11 @@ def _bootstrap() -> dict:
             scopes=ALL_SCOPES,
             note="服务启动时自动创建的根密钥",
             user_id=admin["id"],
+            secret_ciphertext=seal_api_key(settings.admin_api_key),
+        )
+    elif not existing_admin_key.get("secret_ciphertext"):
+        storage.set_api_key_secret(
+            existing_admin_key["id"], seal_api_key(settings.admin_api_key)
         )
 
     # ---- 3) 管理员账号下的默认 Agent 密钥 ----
@@ -239,8 +262,18 @@ def _bootstrap() -> dict:
             scopes=AGENT_DEFAULT_SCOPES,
             note="首次启动自动创建",
             user_id=admin["id"],
+            secret_ciphertext=seal_api_key(agent_key),
         )
         result.update(first_run=True, agent_api_key=agent_key)
+    else:
+        # 旧版本只存哈希；如果 keys.txt 里还保留了默认 Agent Key，升级时补入密文。
+        existing_agent = storage.find_api_key_by_name("agent-default", admin["id"])
+        if existing_agent and not existing_agent.get("secret_ciphertext"):
+            candidate = settings.bootstrap_api_key or recorded_key(
+                "AGENT_API_KEY", existing_agent["key_hash"]
+            )
+            if candidate and hash_key(candidate) == existing_agent["key_hash"]:
+                storage.set_api_key_secret(existing_agent["id"], seal_api_key(candidate))
 
     result["admin_username"] = result.get("admin_username") or admin["username"]
     return result
@@ -249,7 +282,7 @@ def _bootstrap() -> dict:
 def _dump_first_run(boot: dict) -> None:
     lines = [
         "=" * 66,
-        " 首次启动：已创建管理员账号与 API 密钥（明文只在这里出现，请保存）",
+        " 首次启动：已创建管理员账号与 API 密钥（原文已加密保存，也可在控制台复制）",
         "=" * 66,
         f" [控制台]  用户名 / USERNAME  = {boot.get('admin_username')}",
     ]

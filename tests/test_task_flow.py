@@ -408,8 +408,20 @@ else:
 
     # 新账号自己的密钥，只能看自己的数据
     st, r = call("POST", "/api/v1/keys", {"name": f"k-{uniq}", "scopes": ["mail:send", "mail:read", "tasks:write", "tasks:read", "keys:manage"]}, token=user_token)
-    user_key = (r.get("data") or {}).get("api_key") or ""
+    user_key_data = r.get("data") or {}
+    user_key = user_key_data.get("api_key") or ""
+    user_key_id = user_key_data.get("id") or ""
     check("新账号可自建密钥", st == 201 and bool(user_key), f"status={st}")
+    st, r = call("GET", f"/api/v1/keys/{user_key_id}/secret", token=user_token)
+    check("已创建密钥支持后续复制", st == 200 and (r.get("data") or {}).get("api_key") == user_key, f"status={st}")
+    st, r = call("GET", "/api/v1/keys", token=user_token)
+    listed = (r.get("data") or {}).get("items") or []
+    check("密钥列表标记原文可复制", any(row.get("id") == user_key_id and row.get("secret_available") for row in listed))
+    check("密钥列表不泄露哈希", all("key_hash" not in row for row in listed))
+    st, r = call("POST", f"/api/v1/keys/{user_key_id}/secret", {"api_key": user_key}, token=user_token)
+    check("保存已有密钥不改变 Key", st == 200 and (r.get("data") or {}).get("saved") is True, f"status={st}")
+    st, r = call("GET", f"/api/v1/keys/{user_key_id}/secret", token=user_token)
+    check("保存后仍可复制同一把 Key", st == 200 and (r.get("data") or {}).get("api_key") == user_key, f"status={st}")
     st, r = call("POST", "/api/v1/keys", {"name": f"k2-{uniq}", "scopes": ["mail:send", "mail:read", "tasks:write", "tasks:read"]}, token=user_token)
     user_key_2 = (r.get("data") or {}).get("api_key") or ""
     check("新账号可再建第二把密钥", st == 201 and bool(user_key_2), f"status={st}")

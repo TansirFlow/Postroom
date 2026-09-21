@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
     scopes        TEXT NOT NULL DEFAULT '',
     enabled       INTEGER NOT NULL DEFAULT 1,
     note          TEXT DEFAULT '',
+    secret_ciphertext TEXT,
     created_at    TEXT NOT NULL,
     last_used_at  TEXT,
     call_count    INTEGER NOT NULL DEFAULT 0
@@ -184,6 +185,7 @@ MIGRATIONS: dict[str, dict[str, str]] = {
     },
     "api_keys": {
         "user_id": "TEXT",
+        "secret_ciphertext": "TEXT",
     },
     "tasks": {
         "user_id": "TEXT",
@@ -576,13 +578,25 @@ def insert_api_key(
     scopes: list[str],
     note: str = "",
     user_id: str | None = None,
+    secret_ciphertext: str | None = None,
 ) -> str:
     key_id = new_id("key")
     with db() as conn:
         conn.execute(
-            """INSERT INTO api_keys (id,user_id,name,key_hash,prefix,scopes,enabled,note,created_at)
-               VALUES (?,?,?,?,?,?,1,?,?)""",
-            (key_id, _owned_user_id(user_id), name, key_hash, prefix, ",".join(scopes), note, now_iso()),
+            """INSERT INTO api_keys
+               (id,user_id,name,key_hash,prefix,scopes,enabled,note,secret_ciphertext,created_at)
+               VALUES (?,?,?,?,?,?,1,?,?,?)""",
+            (
+                key_id,
+                _owned_user_id(user_id),
+                name,
+                key_hash,
+                prefix,
+                ",".join(scopes),
+                note,
+                secret_ciphertext,
+                now_iso(),
+            ),
         )
     return key_id
 
@@ -593,7 +607,9 @@ def list_api_keys(user_id: str | None = None) -> list[dict[str, Any]]:
     _scope(user_id, where, params)
     with db() as conn:
         rows = conn.execute(
-            f"""SELECT id,user_id,name,prefix,scopes,enabled,note,created_at,last_used_at,call_count
+            f"""SELECT id,user_id,name,prefix,scopes,enabled,note,
+                       (secret_ciphertext IS NOT NULL AND secret_ciphertext != '') AS secret_available,
+                       created_at,last_used_at,call_count
                 FROM api_keys WHERE {' AND '.join(where)} ORDER BY created_at DESC""",
             params,
         ).fetchall()
@@ -602,8 +618,57 @@ def list_api_keys(user_id: str | None = None) -> list[dict[str, Any]]:
         d = dict(r)
         d["scopes"] = [s for s in (d["scopes"] or "").split(",") if s]
         d["enabled"] = bool(d["enabled"])
+        d["secret_available"] = bool(d["secret_available"])
         out.append(d)
     return out
+
+
+def get_api_key(
+    key_id: str, user_id: str | None = None, *, scoped: bool = False
+) -> dict[str, Any] | None:
+    """读取单把密钥的非敏感信息。"""
+    where = ["id = ?"]
+    params: list[Any] = [key_id]
+    if scoped:
+        _scope(user_id, where, params)
+    with db() as conn:
+        row = conn.execute(
+            f"""SELECT id,user_id,name,key_hash,prefix,scopes,enabled,note,
+                       (secret_ciphertext IS NOT NULL AND secret_ciphertext != '') AS secret_available,
+                       created_at,last_used_at,call_count
+                FROM api_keys WHERE {' AND '.join(where)}""",
+            params,
+        ).fetchone()
+    if not row:
+        return None
+    data = dict(row)
+    data["scopes"] = [s for s in (data.get("scopes") or "").split(",") if s]
+    data["enabled"] = bool(data["enabled"])
+    data["secret_available"] = bool(data["secret_available"])
+    return data
+
+
+def get_api_key_secret(
+    key_id: str, user_id: str | None = None, *, scoped: bool = False
+) -> str | None:
+    where = ["id = ?"]
+    params: list[Any] = [key_id]
+    if scoped:
+        _scope(user_id, where, params)
+    with db() as conn:
+        row = conn.execute(
+            f"SELECT secret_ciphertext FROM api_keys WHERE {' AND '.join(where)}", params
+        ).fetchone()
+    return row["secret_ciphertext"] if row else None
+
+
+def set_api_key_secret(key_id: str, secret_ciphertext: str) -> bool:
+    with db() as conn:
+        cur = conn.execute(
+            "UPDATE api_keys SET secret_ciphertext = ? WHERE id = ?",
+            (secret_ciphertext, key_id),
+        )
+    return cur.rowcount > 0
 
 
 def find_api_key_by_hash(key_hash: str) -> dict[str, Any] | None:

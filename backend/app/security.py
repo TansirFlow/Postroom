@@ -2,7 +2,8 @@
 鉴权：支持两种凭证，任意一种通过即可。
 
 1. **API Key**（Agent 用）—— ``X-API-Key`` 头、``Authorization: Bearer sk-xxx``
-   或 ``?api_key=`` 查询参数；密钥只存 sha256 摘要，明文仅在创建时返回一次。
+   或 ``?api_key=`` 查询参数；数据库保存 sha256 摘要用于鉴权，同时保存经站点签名密钥加密的
+   原文，只有本账号的 ``keys:manage`` 用户可以通过控制台复制。
    每个密钥归属于一个用户，故数据读写天然按用户隔离。
 2. **登录会话**（人在网页用）—— ``Authorization: Bearer <session-token>``
    或 HttpOnly Cookie；无状态 HMAC 签名令牌，见 ``tokens.issue_session``。
@@ -17,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import base64
 import secrets
 from dataclasses import dataclass, field
 
@@ -35,6 +37,7 @@ SCOPES = {
 }
 ALL_SCOPES = list(SCOPES.keys())
 API_KEY_PREFIX = "sk-"
+_KEY_SECRET_LABEL = b"postroom/api-key-secret/v1"
 
 
 class AuthError(HTTPException):
@@ -48,6 +51,57 @@ def hash_key(raw: str) -> str:
 
 def generate_key(prefix: str = "sk-agent") -> str:
     return f"{prefix}-{secrets.token_urlsafe(24)}"
+
+
+def _key_secret_material() -> bytes:
+    """从站点签名密钥派生 API Key 原文的加密材料。"""
+    return hmac.new(
+        tokens.get_secret().encode("utf-8"), _KEY_SECRET_LABEL, hashlib.sha256
+    ).digest()
+
+
+def _xor_key_stream(data: bytes, nonce: bytes, material: bytes) -> bytes:
+    output = bytearray()
+    for counter in range((len(data) + 31) // 32):
+        block = hmac.new(
+            material,
+            _KEY_SECRET_LABEL + b"/stream/" + nonce + counter.to_bytes(8, "big"),
+            hashlib.sha256,
+        ).digest()
+        start = counter * 32
+        output.extend(value ^ block[index] for index, value in enumerate(data[start : start + 32]))
+    return bytes(output)
+
+
+def seal_api_key(raw: str) -> str:
+    """加密保存 API Key 原文；数据库不保存可直接使用的明文。"""
+    material = _key_secret_material()
+    nonce = secrets.token_bytes(16)
+    cipher = _xor_key_stream(raw.encode("utf-8"), nonce, material)
+    tag = hmac.new(material, _KEY_SECRET_LABEL + b"/tag/" + nonce + cipher, hashlib.sha256).digest()
+    encoded = lambda value: base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+    return f"v1.{encoded(nonce)}.{encoded(cipher)}.{encoded(tag)}"
+
+
+def unseal_api_key(sealed: str | None) -> str | None:
+    """解密 API Key 原文；旧版本没有密文时返回 None。"""
+    if not sealed:
+        return None
+    try:
+        version, nonce_text, cipher_text, tag_text = sealed.split(".", 3)
+        if version != "v1":
+            return None
+        decode = lambda value: base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+        nonce, cipher, tag = decode(nonce_text), decode(cipher_text), decode(tag_text)
+        material = _key_secret_material()
+        expected = hmac.new(
+            material, _KEY_SECRET_LABEL + b"/tag/" + nonce + cipher, hashlib.sha256
+        ).digest()
+        if not hmac.compare_digest(tag, expected):
+            return None
+        return _xor_key_stream(cipher, nonce, material).decode("utf-8")
+    except (ValueError, UnicodeDecodeError, TypeError):
+        return None
 
 
 @dataclass

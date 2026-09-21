@@ -48,7 +48,7 @@ postroom/
 ├─ frontend/                    # Vue 3 + Vite 控制台
 │  └─ src/{App.vue,components/*,views/*,api.js,router.js,styles.css}
 ├─ tests/
-│  └─ test_task_flow.py         # 对话/收件箱 + 回复链接 + 多用户隔离端到端回归（自清理，157 项断言）
+│  └─ test_task_flow.py         # 对话/收件箱 + 回复链接 + 多用户隔离端到端回归（自清理，162 项断言）
 ├─ screenshots/                 # 登录页 / 使用教程 / 控制台 / 设置 / 用户管理 / 回复页截图
 ├─ LICENSE                      # MIT
 ├─ run-backend.cmd              # Windows 一键启动后端
@@ -183,11 +183,16 @@ npm run build
 | `mail:read` | 查发送记录、统计 |
 | `tasks:write` | 建任务/对话、向线程发消息、吊销/轮换回复链接、关闭任务、`POST /inbox/ack` 推进水位 |
 | `tasks:read` | 查对话与任务列表/详情、`GET /inbox` 拉取用户回复 |
-| `keys:manage` | 增删改**本账号**的 API 密钥 |
+| `keys:manage` | 增删改、复制**本账号**的 API 密钥 |
 | `users:manage` | 管理用户账号（**仅管理员**，且不能给自己发放之外的账号分配） |
 
 **网页登录的人**默认拿到前五项全权限；**API Key** 按创建时勾选的权限来。
 判断权限只看 `scopes`，管理员也不做「权限直通」——一个只有 `mail:send` 的 Agent 密钥不会因为归属管理员账号就获得建账号的能力。
+
+API Key 的鉴权哈希仍用于校验，同时额外保存一份由站点签名密钥加密的原文，
+因此可以在「API 密钥」页面复制同一把固定 Key，不需要轮换。旧版本创建且数据库中没有密文的 Key，
+无法从哈希反推出原文；如果某台仍在使用它的电脑上还保留原文，可在页面点「保存现有 Key」补录，
+服务端会先校验哈希再加密保存，原 Key、权限和鉴权方式都不会改变。
 
 ### 3.3 数据隔离（全部按账号）
 
@@ -303,6 +308,7 @@ curl -X POST http://127.0.0.1:8077/api/v1/mail/send \
 | GET | `/api/v1/mail/templates` | `mail:send` | 模板及变量 |
 | POST | `/api/v1/mail/verify-connection` | `mail:send` | SMTP 连通性 / 登录测试（用本账号生效的配置） |
 | GET/POST/PATCH/DELETE | `/api/v1/keys...` | `keys:manage` | 密钥管理（仅本账号） |
+| GET | `/api/v1/keys/{id}/secret` | `keys:manage` | 复制当前固定密钥原文（服务端加密保存，不改变 Key） |
 
 任务会话接口见下一节。
 
@@ -632,7 +638,7 @@ dispatch("ack_inbox", {"upto_seq": inbox["next_cursor"]})
 
 1. 复制 `backend/.env.example` 为 `backend/.env` 后再填写 SMTP 信息；**不要**把填好的 `.env` 提交进任何仓库。
 2. 建议使用**邮件服务商的应用专用密码**，而不是账号主密码。
-3. `BOOTSTRAP_API_KEY` / `ADMIN_API_KEY` / `BOOTSTRAP_ADMIN_PASSWORD` 留空即让服务在首次启动时随机生成（明文只打印一次并写入 `data/keys.txt`）；**不要**在 `.env` 里写死固定口令或密钥。首次登录后请立刻改密码。
+3. `BOOTSTRAP_API_KEY` / `ADMIN_API_KEY` / `BOOTSTRAP_ADMIN_PASSWORD` 留空即让服务在首次启动时随机生成；首次启动输出和 `data/keys.txt` 仅用于接管初始凭据，API Key 原文随后会以密文保存，也可在控制台复制。**不要**在 `.env` 里写死固定口令或密钥。首次登录后请立刻改密码。
 4. 对外暴露时不要直接把 `8077` 端口开到公网：请放在 Nginx / Caddy 后面加 HTTPS，并限定来源 IP。
    **没有 HTTPS 时不要开放登录页** —— 账号密码会以明文经过中间链路（会话令牌在 `ENV=prod` 下才会带 `Secure` Cookie 标志）。
 5. `STORE_BODY_PREVIEW=true` 会把正文摘要存进 SQLite；处理敏感内容时请置为 `false`。
@@ -668,7 +674,7 @@ AGENT_API_KEY=sk-agent-xxxxx TEST_RECIPIENT=you@example.com \
   backend/.venv/Scripts/python.exe tests/test_task_flow.py --send
 ```
 
-覆盖 **157 项断言**，全程自清理（建的对话、任务、账号都会删掉）：
+覆盖 **162 项断言**，全程自清理（建的对话、任务、账号都会删掉）：
 
 | 段落 | 内容 |
 | --- | --- |

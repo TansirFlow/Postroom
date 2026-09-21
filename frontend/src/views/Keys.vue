@@ -8,6 +8,10 @@ const loading = ref(false)
 const creating = ref(false)
 const showCreate = ref(false)
 const createdKey = ref(null)
+const keyModalKind = ref('created')
+const importRow = ref(null)
+const importValue = ref('')
+const importing = ref(false)
 const form = reactive({ name: '', scopes: ['mail:send', 'mail:read'], note: '' })
 const revealed = ref({})
 
@@ -46,6 +50,7 @@ async function create() {
       scopes: form.scopes,
       note: form.note,
     })
+    keyModalKind.value = 'created'
     showCreate.value = false
     form.name = ''
     form.note = ''
@@ -55,6 +60,39 @@ async function create() {
     toast(e.message, 'error')
   } finally {
     creating.value = false
+  }
+}
+
+async function showSecret(row) {
+  try {
+    createdKey.value = await api.get(`/api/v1/keys/${row.id}/secret`)
+    keyModalKind.value = 'existing'
+  } catch (e) {
+    toast(e.message, 'error')
+  }
+}
+
+function openImport(row) {
+  importRow.value = row
+  importValue.value = ''
+}
+
+async function saveImport() {
+  if (!importRow.value || !importValue.value.trim()) {
+    toast('请粘贴现有 API Key', 'warn')
+    return
+  }
+  importing.value = true
+  try {
+    await api.post(`/api/v1/keys/${importRow.value.id}/secret`, { api_key: importValue.value.trim() })
+    toast('已保存，原密钥未改变')
+    importRow.value = null
+    importValue.value = ''
+    await load()
+  } catch (e) {
+    toast(e.message, 'error')
+  } finally {
+    importing.value = false
   }
 }
 
@@ -136,7 +174,9 @@ onMounted(load)
           <td class="mono">{{ row.call_count }}</td>
           <td class="mono muted">{{ row.last_used_at ? fmtTime(row.last_used_at) : '-' }}</td>
           <td style="white-space: nowrap">
-            <button class="btn btn-sm" @click="toggleKey(row)">{{ row.enabled ? '停用' : '启用' }}</button>
+            <button v-if="row.secret_available" class="btn btn-sm" @click="showSecret(row)">复制密钥</button>
+            <button v-else class="btn btn-sm" @click="openImport(row)" title="从仍在使用该 Key 的电脑粘贴原文">保存现有 Key</button>
+            <button class="btn btn-sm" style="margin-left: 6px" @click="toggleKey(row)">{{ row.enabled ? '停用' : '启用' }}</button>
             <button class="btn btn-sm btn-danger" style="margin-left: 6px" @click="removeKey(row)">删除</button>
           </td>
         </tr>
@@ -189,23 +229,45 @@ onMounted(load)
     </div>
   </div>
 
-  <!-- 新建后展示一次明文 -->
+  <!-- 新建或复制现有密钥时展示原文 -->
   <div v-if="createdKey" class="modal-mask" @click.self="createdKey = null">
     <div class="modal">
-      <div class="modal-head">密钥已创建 · 请立即保存</div>
+      <div class="modal-head">{{ keyModalKind === 'created' ? '密钥已创建' : '复制现有密钥' }}</div>
       <div class="modal-body">
-        <div class="banner banner-warn">明文密钥只显示这一次，关闭后无法再次查看。</div>
+        <div class="banner banner-warn">
+          {{ keyModalKind === 'created'
+            ? '密钥原文已加密保存，之后可在列表中再次复制。'
+            : '这是当前正在使用的固定密钥，不会改变；复制后可继续在其他电脑上使用。' }}
+        </div>
         <div class="field">
           <label class="field-label">{{ createdKey.name }}</label>
           <pre class="code">{{ createdKey.api_key }}</pre>
         </div>
         <div class="row">
           <button class="btn btn-primary" @click="copy(createdKey.api_key)">复制密钥</button>
-          <button class="btn" @click="copy(createdKey.api_key)">复制并关闭</button>
+          <button class="btn" @click="copyAndClose(createdKey.api_key)">复制并关闭</button>
         </div>
       </div>
       <div class="modal-foot">
         <button class="btn" @click="createdKey = null">我已保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 为旧版本密钥补存原文，不会改变该密钥 -->
+  <div v-if="importRow" class="modal-mask" @click.self="importRow = null">
+    <div class="modal">
+      <div class="modal-head">保存现有 API Key</div>
+      <div class="modal-body">
+        <div class="banner banner-warn">从仍在使用这把 Key 的电脑粘贴原文。服务端会先校验匹配，再加密保存；Key 本身不会改变。</div>
+        <div class="field">
+          <label class="field-label">{{ importRow.name }}</label>
+          <input v-model="importValue" class="mono" type="password" autocomplete="off" placeholder="粘贴现有 API Key" />
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" @click="importRow = null">取消</button>
+        <button class="btn btn-primary" :disabled="importing" @click="saveImport">{{ importing ? '保存中…' : '校验并保存' }}</button>
       </div>
     </div>
   </div>
