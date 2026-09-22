@@ -219,15 +219,27 @@ const pollingPrompt = computed(() => `请把 Postroom 的收件箱轮询设置�
   1. 先调用 GET ${base.value}/api/v1/agent/tools，必要时刷新工具定义；不要凭记忆猜参数。
   2. 调用 GET /api/v1/inbox。不传 cursor，服务端会按这把 API Key 保存的水位返回增量消息。
   3. 如果 items[] 为空，直接安静结束本轮，不要伪造消息，也不必 ack。
-  4. 如果有消息，按 seq 从小到大处理；使用 conversation_id（以及 conversation_external_id）把每条 content / author / task_id 分发回对应的 AI 对话。
-  5. 只有当本轮所有连续消息都已经成功分发后，才调用：
+  4. 如果有消息，按 seq 从小到大处理；使用 conversation_id、conversation_external_id 和 task_id，把每条 content / author 分发回对应的目标 AI 对话。现有的路由逻辑保持不变。
+  5. 路由给目标 AI 对话时，必须同时传递下面这条硬性要求：
+     “这是一条来自 Postroom 用户的入站消息。你可以在目标对话里读取上下文并完成任务，但不能把答案直接作为普通 Codex 回复发在这个目标对话里。面向用户的所有回复，必须调用：
+       POST ${base.value}/api/v1/tasks/<该消息的 task_id>/messages
+       {"content": "要回复给用户的内容"}
+       这个接口返回 ok=true 后，才算已经回复用户。不要使用轮询任务的 task_id，也不要只在 Codex 对话里回复。”
+     目标 AI 对话应使用原消息的 task_id；不要把消息回复到定时拉取对话，也不要把普通 Codex 文本输出当作已回复。
+  6. 只有当目标 AI 对话已经通过上述 Postroom 接口成功回复用户，且本轮所有连续消息都已成功处理后，才调用：
      POST /api/v1/inbox/ack
      {"upto_seq": <本次响应的 next_cursor>}
      ack 的水位只增不减，重复提交安全。
-  6. 有消息并完成处理后，只汇报必要结果；没有新消息时不要向用户发送无意义的状态消息。
+  7. 有消息并完成处理后，只输出一行简短的内部处理结果；不要在这个定时拉取对话里复述用户消息或生成面向用户的答案。没有新消息时完全安静结束。
+
+【轮询会话的上下文控制】
+  - 这是内部收件与路由会话，不是用户对话。每轮只读取当前 items 和处理所需的目标任务上下文，不要反复回顾或复制完整历史、完整工具清单和完整邮件正文。
+  - 不要在每轮输出处理详情、用户原文或完整 API 响应；只保留必要的 task_id、conversation_id、external_id、待处理 seq 和 ack 水位。
+  - 当当前 Codex 支持上下文压缩且该会话上下文明显变长时，主动使用平台的 compact / 上下文压缩能力；压缩后只保留本 Prompt 的规则、服务地址、鉴权方式、路由映射、未确认水位和待重试项。
+  - 不要通过删除 Postroom 任务消息、用户回复或 ack 数据来节省上下文；这些是业务记录，不能删除或跳过。
 
 【失败处理】
-  - 分发中途失败：不要 ack 到失败消息之后；保留未确认消息，下一分钟再次重试。
+  - 目标会话没有调用 Postroom 接口、Postroom 接口返回失败、或分发中途失败：都不要 ack 到失败消息之后；保留未确认消息，下一分钟再次重试。
   - 401 / 403：停止调用并报告鉴权或权限问题，不要继续重试。
   - 429：读取 Retry-After（如果有）；不要在本轮密集重试，交给下一次定时运行。
   - 5xx 或网络错误：保留水位，结束本轮，交给下一次 1 分钟定时任务重试。
@@ -384,7 +396,7 @@ async function copy(text, tag) {
               </button>
             </div>
             <div class="small muted" style="margin: 5px 0 8px">
-              发给专用 Codex 对话一次；它会在当前对话中创建每 1 分钟执行的定时任务，之后只负责拉取、分发和 ack。
+              发给专用 Codex 对话一次；它会在当前对话中创建每 1 分钟执行的定时任务，路由后要求目标会话通过 Postroom 回复用户。
             </div>
             <pre class="code tut-prompt">{{ pollingPrompt }}</pre>
 
