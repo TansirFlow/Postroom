@@ -119,6 +119,11 @@ const startupPrompt = computed(() => `你是通过 Postroom 与人协作的 AI A
 服务地址  ${base.value}
 鉴权      每个请求都要带请求头  X-API-Key: ${KEY_PLACEHOLDER}
 
+【会话生命周期（强制规则）】
+  Postroom 对话和任务会话是长期开放的。发送一条消息、完成一个阶段、暂时没有新消息，或者本轮任务执行结束，都不代表会话结束。
+  禁止主动调用 POST /api/v1/conversations/<conversation_id>/close 或 POST /api/v1/tasks/<task_id>/close；不要因为“已经发完一次消息”就关闭会话。
+  只有用户明确要求结束、关闭或取消这个任务时，才允许调用关闭接口；否则必须保持会话和回复链接有效，等待用户后续回复。
+
 【第一步：发现工具】不要凭记忆猜字段，先调用：
   GET ${base.value}/api/v1/agent/tools
   返回的是 OpenAI function-calling 格式的 tools；按每项的 method + endpoint + parameters 组装请求。
@@ -139,9 +144,7 @@ const startupPrompt = computed(() => `你是通过 Postroom 与人协作的 AI A
      POST /api/v1/tasks/<task_id>/messages
      {"content": "要回复的话"}
      → 默认沿用该任务首次发信的收件人；也可以传 notify_email 设置并更新该任务的通知地址
-  6. 任务完成后收尾：
-     POST /api/v1/conversations/<conversation_id>/close
-     或 POST /api/v1/tasks/<task_id>/close
+  6. 当前阶段完成或暂时没有后续动作时，不要关闭任务或对话；保持开放，等待用户可能的后续回复。只有用户明确要求结束时，才可以调用关闭接口。
 
 【重试机制】
   - 网络错误、超时、HTTP 408 / 429 / 500 / 502 / 503 / 504：最多重试 3 次，等待时间依次为 2 秒、5 秒、10 秒；429 优先遵守响应中的 Retry-After。
@@ -168,6 +171,11 @@ const midTaskPrompt = computed(() => `这个任务已经进行到一半。请不
 
 服务地址  ${base.value}
 鉴权      每个请求都要带请求头  X-API-Key: ${KEY_PLACEHOLDER}
+
+【会话生命周期（强制规则）】
+  Postroom 对话和任务会话是长期开放的。发送“中途接入”消息、完成当前阶段、暂时没有新消息，都不代表会话结束。
+  禁止主动调用 POST /api/v1/conversations/<conversation_id>/close 或 POST /api/v1/tasks/<task_id>/close；不要因为已经发送过消息或当前工作阶段完成就关闭会话。
+  只有用户明确要求结束、关闭或取消这个任务时，才允许调用关闭接口；否则必须保持会话开放，继续沿用同一个 task_id。
 
 【立即执行一次】
   1. 先调用 GET ${base.value}/api/v1/agent/tools，按返回的工具定义组装请求，不要凭记忆猜字段。
@@ -214,7 +222,7 @@ const pollingPrompt = computed(() => `请把 Postroom 的收件箱轮询设置�
 鉴权      每个请求都要带请求头  X-API-Key: ${KEY_PLACEHOLDER}
 
 【定时任务执行内容】
-  你是 Postroom 的定时收件箱 Agent。每次被这个定时任务唤醒时，只执行一轮拉取、分发和确认水位；不要创建任务、不要发送首封邮件、不要在任务内部再次创建定时器，也不要长轮询等待。
+  你是 Postroom 的定时收件箱 Agent。每次被这个定时任务唤醒时，只执行一轮拉取、分发和确认水位；不要创建任务、不要发送首封邮件、不要关闭任何 conversation 或 task、不要在任务内部再次创建定时器，也不要长轮询等待。
 
   1. 先调用 GET ${base.value}/api/v1/agent/tools，必要时刷新工具定义；不要凭记忆猜参数。
   2. 调用 GET /api/v1/inbox。不传 cursor，服务端会按这把 API Key 保存的水位返回增量消息。
