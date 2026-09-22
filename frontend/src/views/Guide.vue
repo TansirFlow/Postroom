@@ -29,11 +29,11 @@ const steps = [
     linkText: '去建密钥',
   },
   {
-    title: '给 Agent 两段提示词',
+    title: '给 Agent 三段提示词',
     badge: '核心',
     badgeClass: 'badge-ok',
-    text: '任务开始时，把「任务启动提示词」发给负责当前工作的 AI；另外把「定时拉取提示词」交给 cron / 定时 Agent，让它周期性读取用户回复。两段职责分开，任务 Agent 不需要阻塞等待。',
-    hint: '两段提示词都会先要求 Agent 读取工具清单；启动提示词负责建对话、发首封邮件，定时提示词只负责 GET /api/v1/inbox、分发回复和 ack。',
+    text: '任务开始时，把「任务启动提示词」发给负责当前工作的 AI；另外把「定时任务安装提示词」发给一个专用 Codex 对话，让它在当前对话中创建每分钟轮询任务。任务已经开始后，也可以使用「中途接入提示词」。',
+    hint: '启动提示词会立即创建任务会话并发送首封创建消息；定时任务安装提示词只负责建立每分钟轮询；中途接入提示词用于把已经进行中的任务接入 Postroom。',
     to: '/docs',
     linkText: '去接口文档',
   },
@@ -62,7 +62,7 @@ const flow = [
   { t: 'Agent 发邮件', c: 'POST /api/v1/mail/send', d: '带 "conversation_id"（或 external_id）：自动开一条线程，正文追加「点开即回复」按钮；省略 to 时使用默认通知邮箱' },
   { t: 'Agent 不等', c: '—', d: '任务不会被自动关闭，回复链接默认 30 天有效；Agent 可以继续干别的对话' },
   { t: '收件人回帖', c: '打开邮件里的链接', d: '免登录网页对话，链接本身即凭证；隔几天再回也行' },
-  { t: '定时任务拉取', c: 'GET /api/v1/inbox', d: 'cron 每 30 秒一次取走全部对话的增量回复，按 conversation_id 分发回各自对话' },
+  { t: '定时任务拉取', c: 'GET /api/v1/inbox', d: 'Codex 定时任务每 1 分钟取走全部对话的增量回复，按 conversation_id 分发回各自对话' },
   { t: '确认水位', c: 'POST /api/v1/inbox/ack', d: '分发成功后推进水位；下次不带 cursor 就从新水位继续，不会重复投递' },
 ]
 
@@ -113,7 +113,7 @@ const checks = [
   '「概览」页的今日发信量、成功率随之变化',
 ]
 
-// ---------------------------------------------------------------- Agent 提示词（启动任务 / 定时拉取分开）
+// ---------------------------------------------------------------- Agent 提示词（启动任务 / 定时拉取 / 中途接入分开）
 const startupPrompt = computed(() => `你是通过 Postroom 与人协作的 AI Agent。下面是“任务启动时”的规则；只负责当前任务的开局与推进，不要在本次任务里阻塞等待用户回复。
 
 服务地址  ${base.value}
@@ -129,12 +129,12 @@ const startupPrompt = computed(() => `你是通过 Postroom 与人协作的 AI A
      POST /api/v1/conversations
      {"external_id": "codex:<你的会话 id>", "title": "本次任务名称", "agent_name": "你的名字"}
      → 记下返回的 conversation_id
-  3. 需要人确认或回复时，在这个对话下发邮件：
+  3. 对话创建或复用后，立即在这个对话下发送一条“任务已开始”的创建消息；即使当前还没有需要用户确认的事项，也不要等到后面才发第一封邮件：
      POST /api/v1/mail/send
-     {"conversation_id": "<上一步的 id>", "thread_title": "标题", "subject": "...", "body": "...", "idempotency_key": "<稳定且唯一的发信幂等键>"}
+     {"conversation_id": "<上一步的 id>", "thread_title": "本次任务名称", "subject": "任务已开始：<本次任务名称>", "body": "任务已开始执行。当前进度：<简要说明>。后续如有需要确认、补充信息或重要进展，我会继续在这个任务会话中通知；当前无需等待你的回复。", "idempotency_key": "<稳定且唯一的初始化发信幂等键>"}
      → 如果没有在请求中提供 to，服务端会使用网页「系统设置」里的默认通知邮箱
      → 邮件正文会自动追加「点开即回复」按钮，不要自己拼 reply_url
-  4. 发完邮件后继续执行主任务，不要长轮询、不要等待用户。用户回复由另一段“定时拉取提示词”处理。
+  4. 发完初始化邮件后继续执行主任务，不要长轮询、不要等待用户。用户回复由另一段“定时任务安装提示词”创建的每分钟定时任务处理。
   5. 需要主动补充消息或通知对方时：
      POST /api/v1/tasks/<task_id>/messages
      {"content": "要回复的话"}
@@ -162,6 +162,43 @@ const startupPrompt = computed(() => `你是通过 Postroom 与人协作的 AI A
 
 【注意】
   回复链接是敏感凭证，不要转发到公开渠道；需要作废时调用 POST /api/v1/tasks/<id>/reply-link 轮换。
+  不要把 API Key 或 reply_url 写入公开日志、代码仓库或发给无关人员。`)
+
+const midTaskPrompt = computed(() => `这个任务已经进行到一半。请不要重置、暂停或另开一套并行任务；从现在开始把当前 Codex 对话接入 Postroom，让我可以通过邮件网页回复与你沟通。
+
+服务地址  ${base.value}
+鉴权      每个请求都要带请求头  X-API-Key: ${KEY_PLACEHOLDER}
+
+【立即执行一次】
+  1. 先调用 GET ${base.value}/api/v1/agent/tools，按返回的工具定义组装请求，不要凭记忆猜字段。
+  2. 为当前 Codex 对话选择稳定的 external_id：优先使用当前 Codex task / thread id；如果当前环境不直接显示，就使用“项目标识 + 当前任务的稳定名称”组成，并在后续始终复用同一个值，禁止使用随机值。
+  3. 幂等创建或复用 Postroom 对话：
+     POST /api/v1/conversations
+     {"external_id": "codex:<当前对话的稳定标识>", "title": "<当前任务名称>", "agent_name": "你的名字"}
+  4. 不要等到下一次需要通知时才创建任务会话。现在就发送一封“中途接入”消息，让 Postroom 立即建立任务会话并保存当前收件人：
+     POST /api/v1/mail/send
+     {"conversation_id": "<上一步的 conversation_id>", "thread_title": "<当前任务名称>", "subject": "已接入 Postroom：<当前任务名称>", "body": "任务正在进行中，已从当前进度接入 Postroom。当前进度：<简要说明>。后续重要进展、需要确认的事项和最终结果会继续在这个任务会话中通知。", "idempotency_key": "<稳定且唯一的中途接入发信幂等键>"}
+     → 如果没有提供 to，服务端会使用网页「系统设置」里的默认通知邮箱
+     → 邮件正文会自动追加「点开即回复」按钮，不要自己拼 reply_url
+  5. 记录返回的 task_id 和 conversation_id，并向用户说明已接入成功；如果初始化发送失败，按下面的重试规则处理，不要假装成功。
+
+【接入后规则】
+  - 继续执行当前任务，不要阻塞等待用户回复，不要在任务内部创建定时器或长轮询。
+  - 后续需要让用户知道进展、请求确认或发送最终结果时，调用：
+    POST /api/v1/tasks/<task_id>/messages
+    {"content": "要通知用户的内容"}
+    默认会发到初始化邮件使用的收件人；只有需要更换收件人时才传 notify_email。
+  - 用户的回复由另一个 Codex 对话中的每分钟定时任务通过 GET /api/v1/inbox 拉取，再按 conversation_id 分发回当前对话；不要在这里自己 ack 或重复拉取。
+
+【重试与安全】
+  - 网络错误、超时、HTTP 408 / 429 / 500 / 502 / 503 / 504：最多重试 3 次，等待 2 秒、5 秒、10 秒；429 优先遵守 Retry-After。
+  - 重试 POST /api/v1/mail/send 时必须复用同一个 idempotency_key；external_id 也必须保持不变。
+  - 401 / 403、400 / 404 / 422、smtp_auth_failed、recipient_refused 不要重试，先报告并修正配置。
+  - 如果 POST /api/v1/tasks/<task_id>/messages 超时，先检查任务消息或邮件记录再决定是否重试，避免重复通知。
+  - 连续失败后报告 error.code、error.message 和 request_id，不要伪造已接入成功。
+
+【响应契约】
+  所有接口都返回 {"ok": bool, "data": ..., "error": {"code", "message"}, "request_id": "..."}。
   不要把 API Key 或 reply_url 写入公开日志、代码仓库或发给无关人员。`)
 
 const pollingPrompt = computed(() => `请把 Postroom 的收件箱轮询设置成当前 Codex 对话中的定时任务。
@@ -204,7 +241,12 @@ async function copy(text, tag) {
   try {
     await navigator.clipboard.writeText(text)
     copied.value = tag
-    toast(tag === 'startup' ? '已复制任务启动提示词' : '已复制定时拉取提示词')
+    const labels = {
+      startup: '已复制任务启动提示词',
+      polling: '已复制定时任务安装提示词',
+      midTask: '已复制中途接入提示词',
+    }
+    toast(labels[tag] || '已复制提示词')
     setTimeout(() => (copied.value = ''), 1600)
   } catch (e) {
     toast('复制失败，请手动选中复制', 'warn')
@@ -220,14 +262,14 @@ async function copy(text, tag) {
         <div class="tut-hero-title">使用教程</div>
         <div class="tut-hero-sub">
           按顺序走一遍大约 5 分钟：配好发信通道 → 建一把 Agent 密钥 → 把接口交给 Agent →
-          用定时任务从 /inbox 拉回复。用户什么时候回都行，Agent 不用等。
+          用定时任务从 /inbox 拉回复。任务中途也可以随时接入，用户什么时候回都行，Agent 不用等。
         </div>
         <div class="tut-hero-chips">
           <span class="chip">1 · 配 SMTP</span>
           <span class="chip">2 · 建密钥</span>
           <span class="chip">3 · 接入 Agent</span>
           <span class="chip">4 · 每个对话独立发信</span>
-          <span class="chip">5 · cron 拉取回复</span>
+          <span class="chip">5 · 每分钟拉取回复</span>
         </div>
       </div>
       <div class="tut-hero-actions">
@@ -322,7 +364,7 @@ async function copy(text, tag) {
           </div>
           <div class="card-body">
             <div class="small muted" style="margin-bottom: 8px">
-              把 <span class="mono">{{ KEY_PLACEHOLDER }}</span> 换成真实密钥。任务启动提示词给当前任务 Agent；定时拉取提示词给 cron 或专门的后台 Agent。
+              把 <span class="mono">{{ KEY_PLACEHOLDER }}</span> 换成真实密钥。新任务使用①；定时接收任务使用②；任务已经开始后使用③。
             </div>
             <div class="step-title" style="margin-top: 12px">
               ① 任务启动提示词
@@ -331,20 +373,31 @@ async function copy(text, tag) {
               </button>
             </div>
             <div class="small muted" style="margin: 5px 0 8px">
-              每个新任务 / 新对话开始时使用；负责 ensure 对话、发首封邮件、继续主任务。
+              每个新任务 / 新对话开始时使用；会立即创建 Postroom 任务会话并发送首封创建消息，然后继续主任务。
             </div>
             <pre class="code tut-prompt">{{ startupPrompt }}</pre>
 
             <div class="step-title" style="margin-top: 16px">
-              ② 定时拉取提示词
+              ② 定时任务安装提示词
               <button class="btn btn-sm btn-primary" style="float: right" @click="copy(pollingPrompt, 'polling')">
                 {{ copied === 'polling' ? '已复制' : '复制' }}
               </button>
             </div>
             <div class="small muted" style="margin: 5px 0 8px">
-              每 30 秒左右执行一次；只负责拉取、分发和 ack，不创建任务，也不等待单个用户。
+              发给专用 Codex 对话一次；它会在当前对话中创建每 1 分钟执行的定时任务，之后只负责拉取、分发和 ack。
             </div>
             <pre class="code tut-prompt">{{ pollingPrompt }}</pre>
+
+            <div class="step-title" style="margin-top: 16px">
+              ③ 任务中途接入提示词
+              <button class="btn btn-sm btn-primary" style="float: right" @click="copy(midTaskPrompt, 'midTask')">
+                {{ copied === 'midTask' ? '已复制' : '复制' }}
+              </button>
+            </div>
+            <div class="small muted" style="margin: 5px 0 8px">
+              任务已经执行一段时间、还没有接入 Postroom 时使用；会立即发送中途接入消息并沿用当前任务继续工作。
+            </div>
+            <pre class="code tut-prompt">{{ midTaskPrompt }}</pre>
           </div>
         </div>
 
